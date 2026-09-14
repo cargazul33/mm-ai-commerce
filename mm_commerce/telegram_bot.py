@@ -173,6 +173,35 @@ def apply_callback(
         return {"ok": False, "error": "OPP_NOT_FOUND", "id": ext_id}
 
     if action in ("approve", "aprobar"):
+        # CRITICAL: never allow APROBAR while matching/verifier blocked
+        if opp.approval_status == "BLOQUEADO":
+            return {
+                "ok": False,
+                "error": "BLOQUEADO_MATCHING",
+                "id": ext_id,
+                "detail": "Matching/verifier bloqueado — no se puede APROBAR ni oferta completa",
+            }
+        # Also re-check offer apto flag
+        from mm_commerce.models import Offer
+        import json as _json
+        off = (
+            session.query(Offer)
+            .filter_by(opportunity_id=opp.id)
+            .order_by(Offer.id.desc())
+            .first()
+        )
+        if off and off.economic_json:
+            try:
+                econ = _json.loads(off.economic_json)
+                if econ.get("apto_para_cotizar") is False:
+                    return {
+                        "ok": False,
+                        "error": "NO_APTO_COTIZAR",
+                        "id": ext_id,
+                        "detail": econ.get("note") or "matching incompleto",
+                    }
+            except Exception:
+                pass
         status = "APROBADO"
     elif action in ("reject", "rechazar"):
         status = "RECHAZADO"

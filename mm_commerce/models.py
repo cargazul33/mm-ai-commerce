@@ -151,6 +151,10 @@ class SupplierQuote(Base):
     shipping_neuquen: Mapped[str] = mapped_column(Text, default="")
     verified_at: Mapped[str] = mapped_column(String(64), default="")
     match_pct: Mapped[int] = mapped_column(Integer, default=0)
+    match_class: Mapped[str] = mapped_column(String(32), default="")
+    technical_status: Mapped[str] = mapped_column(String(32), default="")
+    commercial_status: Mapped[str] = mapped_column(String(32), default="")
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
 
     supplier: Mapped["Supplier"] = relationship(back_populates="quotes")
 
@@ -276,6 +280,10 @@ _QUOTE_EXTRA_COLUMNS: dict[str, str] = {
     "shipping_neuquen": "TEXT DEFAULT ''",
     "verified_at": "VARCHAR(64) DEFAULT ''",
     "match_pct": "INTEGER DEFAULT 0",
+    "match_class": "VARCHAR(32) DEFAULT ''",
+    "technical_status": "VARCHAR(32) DEFAULT ''",
+    "commercial_status": "VARCHAR(32) DEFAULT ''",
+    "evidence_json": "TEXT DEFAULT '{}'",
 }
 
 _OFFER_EXTRA_COLUMNS: dict[str, str] = {

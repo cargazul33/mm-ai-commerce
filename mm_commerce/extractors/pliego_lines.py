@@ -54,7 +54,8 @@ BRAND_RE = re.compile(
 SKIP_LINE = re.compile(
     r"(?i)^(re\s+cant|cantidad de renglones|total cotizado|marca ofrecida|"
     r"mantenimiento de oferta|forma de pago|plazo de entrega|referencias|"
-    r"safipro|página|pagina|cuit:|descripcion\s*$|pedido de presupuesto)",
+    r"safipro|página|pagina|cuit:|descripcion\s*$|pedido de presupuesto|"
+    r"plieg-|ministerio de |naturales\s*$|sol\s+ofr|per cant)",
 )
 
 
@@ -71,7 +72,16 @@ def _clean_product(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip(" -\t")
     # drop trailing price placeholders
     text = re.sub(r"\$\s*$", "", text).strip()
-    return text[:240]
+    # product name short; full text kept in specs elsewhere
+    return text[:500]
+
+
+def _model_from(text: str) -> str:
+    """Pull commercial SKU from FULL pliego line (prefer Especificacion Adicional)."""
+    from mm_commerce.matching import _extract_model_candidates
+
+    models = _extract_model_candidates(text)
+    return models[0] if models else ""
 
 
 def _brand_from(text: str) -> str:
@@ -104,41 +114,70 @@ def extract_line_items(text: str, *, max_items: int = 40) -> list[dict[str, Any]
 
 
 def _flatten_safipro_blocks(text: str) -> str:
-    """Une continuaciones indentadas de un renglón SAFIPRO en una sola línea lógica."""
+    """Une continuaciones indentadas de un renglón SAFIPRO en una sola línea lógica.
+
+    Survives PDF page breaks (form-feed, headers) so 'Especificacion' + 'Adicional: FO-4075'
+    stay on the same logical row.
+    """
+    # Normalize form-feeds / odd spaces
+    text = text.replace("\x0c", "\n")
     lines = text.splitlines()
     out: list[str] = []
     buf = ""
     row_start = re.compile(r"^\s*\d{1,3}\s+\d+[.,]?\d*\s+[A-ZÁÉÍÓÚÑÜ]")
+    page_noise = re.compile(
+        r"(?i)^(página|pagina|plieg-|safipro|ministerio de |naturales\s*$|"
+        r"re\s+cant|sol\s+ofr|per cant|ofr ofr|unitario|total\s*$)"
+    )
+
+    def _incomplete(b: str) -> bool:
+        b = (b or "").rstrip()
+        if not b:
+            return False
+        return bool(
+            re.search(r"(?i)(especificaci[oó]n|adicional:?|marca sugerida:?|tipo\s*)$", b)
+            or b.endswith("-")
+            or b.endswith(";")
+        )
+
     for raw in lines:
         line = raw.rstrip()
-        if not line.strip():
-            if buf:
+        stripped = line.strip()
+        if not stripped:
+            # Do NOT flush if current renglón looks incomplete (page break mid-spec)
+            if buf and not _incomplete(buf):
                 out.append(buf)
                 buf = ""
             continue
-        if SKIP_LINE.search(line.strip()):
-            if buf:
-                out.append(buf)
-                buf = ""
+        if SKIP_LINE.search(stripped) or page_noise.search(stripped) or re.match(r"(?i)^página\s+\d+", stripped):
             continue
         if row_start.match(line):
             if buf:
                 out.append(buf)
-            buf = line.strip()
-        elif buf and (line.startswith(" ") or line.startswith("\t") or line[:16].strip() == ""):
-            # continuation of product description
-            cont = line.strip()
-            if cont and not cont.startswith("$"):
-                if cont.lower().startswith("marca ofrecida"):
-                    out.append(buf)
-                    buf = ""
-                else:
-                    buf = f"{buf} {cont}"
-        else:
+            buf = stripped
+            continue
+        # Continuation: indented OR dangling 'Adicional:' after page break while buf incomplete
+        cont = stripped
+        if cont.startswith("$"):
+            continue
+        if cont.lower().startswith("marca ofrecida"):
             if buf:
                 out.append(buf)
                 buf = ""
-            out.append(line.strip())
+            continue
+        if buf and (
+            line.startswith(" ")
+            or line.startswith("\t")
+            or line[:16].strip() == ""
+            or _incomplete(buf)
+            or cont.lower().startswith("adicional:")
+        ):
+            buf = f"{buf} {cont}"
+            continue
+        if buf:
+            out.append(buf)
+            buf = ""
+        out.append(stripped)
     if buf:
         out.append(buf)
     return "\n".join(out)
@@ -168,8 +207,8 @@ def _from_safipro(text: str) -> list[dict[str, Any]]:
             "qty": qty,
             "unit": "u",
             "brand": _brand_from(product),
-            "model": "",
-            "specs": product[:400],
+            "model": _model_from(product),
+            "specs": product,  # FULL pliego spec — no truncate
             "verification": "NO VERIFICADO",
             "source_pattern": "safipro_row",
             "_has_semi": has_semi,
@@ -206,8 +245,8 @@ def _from_numbered(text: str) -> list[dict[str, Any]]:
                 "qty": qty,
                 "unit": unit or "u",
                 "brand": _brand_from(product),
-                "model": "",
-                "specs": product[:400],
+                "model": _model_from(product),
+                "specs": product,
                 "verification": "NO VERIFICADO",
                 "source_pattern": "numbered_qty",
             }
@@ -235,8 +274,8 @@ def _from_item_label(text: str) -> list[dict[str, Any]]:
                 "qty": qty,
                 "unit": (m.group("unit") or "u")[:16],
                 "brand": _brand_from(product),
-                "model": "",
-                "specs": product[:400],
+                "model": _model_from(product),
+                "specs": product,
                 "verification": "NO VERIFICADO",
                 "source_pattern": "item_label",
             }

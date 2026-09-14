@@ -130,7 +130,7 @@ def fit_score(
 
 
 def match_score(need: str, candidate: str) -> int:
-    """MATCH SCORE simple por tokens compartidos."""
+    """Legacy token overlap. Prefer mm_commerce.matching.match_line_to_candidate."""
     n = set(w for w in need.lower().split() if len(w) > 2)
     c = set(w for w in candidate.lower().split() if len(w) > 2)
     if not n:

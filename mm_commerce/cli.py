@@ -204,14 +204,20 @@ def circuit_cmd(external_id: str, send: bool, min_fit: int) -> None:
         tg = {"status": "SEND_DISABLED"}
         if send:
             tg = notify_high_fit(session, [card])
-            # prove buttons: simulate view + approve then reject restore? prove approve persists
             sim_view = simulate_callback(session, external_id=opp.external_id, action="view")
-            sim_approve = simulate_callback(
-                session, external_id=opp.external_id, action="approve"
-            )
+            # NEVER auto-approve while matching/verifier blocked
+            if opp.approval_status == "BLOQUEADO" or (ver or {}).get("status") == "BLOQUEADO":
+                sim_approve = {
+                    "ok": False,
+                    "error": "SKIP_APPROVE_WHILE_BLOCKED",
+                    "status": opp.approval_status,
+                }
+            else:
+                sim_approve = simulate_callback(
+                    session, external_id=opp.external_id, action="approve"
+                )
             session.refresh(opp)
             persisted = opp.approval_status
-            # short poll
             from mm_commerce.telegram_bot import poll_callbacks_once
 
             poll = poll_callbacks_once(session, timeout_sec=2)

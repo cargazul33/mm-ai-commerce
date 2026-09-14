@@ -1,10 +1,23 @@
-"""PRICING — merchandise + logistics + costs → ×1.90 → utilidad/margen/capital."""
+"""PRICING — separates technical coverage from commercial readiness.
+
+Full cotizable offer ONLY when every mandatory line has:
+  TECHNICAL in {EXACTO, EQUIVALENTE_PERMITIDO}
+  AND COMMERCIAL == DISPONIBLE (price+stock+envío verified)
+"""
 from __future__ import annotations
 
 import json
 
 from mm_commerce.agents.base import BaseAgent
 from mm_commerce.config import get_settings
+from mm_commerce.matching import (
+    COMM_DISPONIBLE,
+    TECH_EXACTO,
+    TECH_EQUIV,
+    TECH_NO_CUMPLE,
+    TECH_NO_VER,
+    VERIFIED_TECH,
+)
 from mm_commerce.models import (
     LogisticsQuote,
     Offer,
@@ -33,52 +46,100 @@ class PricingAgent(BaseAgent):
             self.session.query(Tender).filter_by(opportunity_id=opp.id).one_or_none()
         )
 
-        chosen: list[SupplierQuote] = []
-        seen_items: set[int | None] = set()
+        best_by_item: dict[int | None, SupplierQuote] = {}
         ranked = sorted(
             quotes,
             key=lambda q: (
-                0 if q.verification == "PROBABLE" else 1,
+                0 if (q.technical_status or q.match_class or "") in VERIFIED_TECH else 1,
                 0 if q.unit_cost is not None else 1,
-                -q.match_score,
+                -(q.match_pct or q.match_score or 0),
             ),
         )
         for q in ranked:
             key = q.tender_item_id
-            if key in seen_items and key is not None:
+            if key in best_by_item and key is not None:
                 continue
-            if q.unit_cost is None:
-                continue
-            if q.verification == "NO VERIFICADO" and not q.url:
-                continue
-            if (q.match_pct or q.match_score or 0) < 40:
-                continue  # weak evidence — do not use in economic base
-            chosen.append(q)
-            seen_items.add(key)
+            best_by_item[key] = q
 
-        merchandise = None
-        if chosen:
-            merchandise = round(
-                sum((q.unit_cost or 0) * (q.qty or 1) for q in chosen), 2
-            )
+        lines_total = len(tender.items) if tender else 0
+        tech_ok_lines: list[SupplierQuote] = []
+        commercial_ok_lines: list[SupplierQuote] = []
+        pending: list[dict] = []
 
+        if tender and tender.items:
+            for it in tender.items:
+                q = best_by_item.get(it.id)
+                tech = (q.technical_status if q else "") or (q.match_class if q else "") or TECH_NO_VER
+                comm = (q.commercial_status if q else "") or "PRECIO_NO_VERIFICADO"
+                if tech in (TECH_NO_CUMPLE, "NO CUMPLE") or tech in (TECH_NO_VER, "NO VERIFICADO", "POSIBLE"):
+                    pending.append(
+                        {
+                            "line_no": it.line_no,
+                            "tech": tech,
+                            "commercial": comm,
+                            "reason": f"TECH:{tech}",
+                        }
+                    )
+                    continue
+                if tech in VERIFIED_TECH and (q.match_pct or 0) >= 90:
+                    tech_ok_lines.append(q)
+                    if (
+                        q.unit_cost is not None
+                        and comm == COMM_DISPONIBLE
+                    ):
+                        commercial_ok_lines.append(q)
+                    else:
+                        pending.append(
+                            {
+                                "line_no": it.line_no,
+                                "tech": tech,
+                                "commercial": comm,
+                                "reason": f"COMMERCIAL:{comm}",
+                            }
+                        )
+                else:
+                    pending.append(
+                        {
+                            "line_no": it.line_no,
+                            "tech": tech,
+                            "commercial": comm,
+                            "reason": "TECH_WEAK",
+                        }
+                    )
+        else:
+            pending.append({"line_no": 0, "reason": "SIN_ITEMS"})
+
+        cobertura_tech = len(tech_ok_lines)
+        cobertura_comm = len(commercial_ok_lines)
+        costo_confirmado = (
+            round(sum((q.unit_cost or 0) * (q.qty or 1) for q in commercial_ok_lines), 2)
+            if commercial_ok_lines
+            else 0.0
+        )
+        # Full offer only when ALL lines tech+commercial ready
+        full_ok = (
+            tender is not None
+            and lines_total > 0
+            and cobertura_tech == lines_total
+            and cobertura_comm == lines_total
+            and not pending
+        )
+
+        merchandise = costo_confirmado if full_ok else None
         logistics = None
         logistics_status = "PENDING"
-        other_costs = None
-
-        total = None
-        if merchandise is not None:
-            if logistics is None:
-                total = merchandise
-            else:
-                total = round(merchandise + (logistics or 0) + (other_costs or 0), 2)
-
+        total = merchandise
         precio = None if total is None else round(total * mult, 2)
         utilidad = None if (precio is None or total is None) else round(precio - total, 2)
         margen = None
         if precio and total and precio > 0:
             margen = round(100.0 * (precio - total) / precio, 2)
-        capital = total
+
+        note = (
+            f"COBERTURA_TECNICA {cobertura_tech}/{lines_total}; "
+            f"COBERTURA_COMERCIAL {cobertura_comm}/{lines_total}; "
+            f"apto={'SI' if full_ok else 'NO'}"
+        )
 
         offer = Offer(
             opportunity_id=opp.id,
@@ -87,70 +148,66 @@ class PricingAgent(BaseAgent):
             margin_multiplier=mult,
             tax_status="PENDING",
             logistics_status=logistics_status,
-            status="BORRADOR",
+            status="BORRADOR" if full_ok else "BLOQUEADO_MATCHING",
             merchandise_cost=merchandise,
             logistics_cost=logistics,
-            other_costs=other_costs,
+            other_costs=None,
             total_cost=total,
             utilidad=utilidad,
             margen_pct=margen,
-            capital_requerido=capital,
+            capital_requerido=total,
             economic_json=json.dumps(
                 {
+                    "cobertura_tecnica": f"{cobertura_tech}/{lines_total}",
+                    "cobertura_comercial": f"{cobertura_comm}/{lines_total}",
+                    "cobertura": f"{cobertura_tech}/{lines_total}",
+                    "costo_confirmado": costo_confirmado,
+                    "costo_verificado": costo_confirmado,
+                    "costo_faltante": None if full_ok else "N/D (líneas sin evidencia comercial completa)",
+                    "costo_pendiente": None if full_ok else "N/D (líneas sin evidencia comercial completa)",
+                    "apto_para_cotizar": full_ok,
+                    "pending_lines": pending,
                     "merchandise": merchandise,
-                    "logistics": logistics,
                     "logistics_status": logistics_status,
-                    "other_costs": other_costs,
-                    "total_cost": total,
                     "precio_objetivo": precio,
                     "multiplier": mult,
-                    "utilidad": utilidad,
-                    "margen_pct": margen,
-                    "capital_requerido": capital,
-                    "lines_priced": len(chosen),
-                    "lines_total": len(tender.items) if tender else 0,
-                    "note": "logistics PENDING — no inventar flete a Neuquén",
+                    "note": note,
                 },
                 ensure_ascii=False,
             ),
-            notes=(
-                "tax/logistics PENDING — no inventar tasas/flete"
-                if merchandise is not None
-                else "sin costos verificados — no inventar"
-            ),
+            notes=note,
         )
         self.session.add(offer)
         self.session.flush()
 
-        if chosen:
-            for q in chosen:
-                unit_price = (
-                    None if q.unit_cost is None else round(q.unit_cost * mult, 2)
-                )
-                self.session.add(
-                    OfferItem(
-                        offer_id=offer.id,
-                        tender_item_id=q.tender_item_id,
-                        description=q.product_label,
-                        qty=q.qty,
-                        unit_cost=q.unit_cost,
-                        unit_price=unit_price,
-                        verification=q.verification,
-                    )
-                )
-        elif tender:
+        if tender and tender.items:
             for it in tender.items:
-                self.session.add(
-                    OfferItem(
-                        offer_id=offer.id,
-                        tender_item_id=it.id,
-                        description=it.product,
-                        qty=it.qty,
-                        unit_cost=None,
-                        unit_price=None,
-                        verification="NO VERIFICADO",
+                q = best_by_item.get(it.id)
+                tech = (q.technical_status if q else "") or (q.match_class if q else TECH_NO_VER)
+                if q and q in commercial_ok_lines and full_ok:
+                    self.session.add(
+                        OfferItem(
+                            offer_id=offer.id,
+                            tender_item_id=it.id,
+                            description=q.product_label,
+                            qty=q.qty,
+                            unit_cost=q.unit_cost,
+                            unit_price=round(q.unit_cost * mult, 2),
+                            verification=tech,
+                        )
                     )
-                )
+                else:
+                    self.session.add(
+                        OfferItem(
+                            offer_id=offer.id,
+                            tender_item_id=it.id,
+                            description=(q.product_label if q else it.product),
+                            qty=it.qty,
+                            unit_cost=None,
+                            unit_price=None,
+                            verification=tech or TECH_NO_VER,
+                        )
+                    )
 
         self.session.add(
             LogisticsQuote(
@@ -161,15 +218,10 @@ class PricingAgent(BaseAgent):
                 notes="REQUIERE COTIZACIÓN REAL a Neuquén — no inventar flete",
             )
         )
-
-        if utilidad is not None:
-            opp.utilidad_estimada = utilidad
-
+        opp.utilidad_estimada = utilidad
         self.finish_run(
             run,
-            f"merch={merchandise}; total={total}; precio={precio}; "
-            f"utilidad={utilidad}; margen%={margen}; capital={capital}; "
-            f"lines={len(chosen)}",
+            f"tech={cobertura_tech}/{lines_total}; comm={cobertura_comm}/{lines_total}; apto={full_ok}",
         )
         opp.state = "PRICING"
         self.session.commit()

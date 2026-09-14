@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from mm_commerce.models import (
@@ -13,6 +11,7 @@ from mm_commerce.models import (
 )
 from mm_commerce.agents.pricing import PricingAgent
 from mm_commerce.config import get_settings
+from mm_commerce.matching import COMM_DISPONIBLE, TECH_EXACTO, TECH_NO_CUMPLE
 
 
 @pytest.fixture()
@@ -37,6 +36,12 @@ def test_precio_objetivo_multiplier(session):
     opp = Opportunity(external_id="99901", title="test", fit_score=80, state="SOURCING")
     session.add(opp)
     session.flush()
+    t = Tender(opportunity_id=opp.id, process_id="99901")
+    session.add(t)
+    session.flush()
+    it = TenderItem(tender_id=t.id, line_no=1, product="Notebook", qty=2)
+    session.add(it)
+    session.flush()
     sup = Supplier(name="S1")
     session.add(sup)
     session.flush()
@@ -44,12 +49,19 @@ def test_precio_objetivo_multiplier(session):
         SupplierQuote(
             supplier_id=sup.id,
             opportunity_id=opp.id,
+            tender_item_id=it.id,
             product_label="Notebook",
             unit_cost=1000.0,
             qty=2,
-            match_score=90,
+            match_score=100,
+            match_pct=100,
+            match_class=TECH_EXACTO,
+            technical_status=TECH_EXACTO,
+            commercial_status=COMM_DISPONIBLE,
             verification="PROBABLE",
             url="https://example.local/x",
+            stock_note="InStock",
+            shipping_neuquen="envío nacional mencionado — cotizar a Neuquén",
         )
     )
     session.commit()
@@ -67,3 +79,40 @@ def test_no_invent_without_cost(session):
     offer = PricingAgent(session).process(opp)
     assert offer.cost_total is None
     assert offer.precio_objetivo is None
+
+
+def test_no_full_offer_when_no_cumple(session):
+    opp = Opportunity(external_id="99903", title="ups", fit_score=80, state="SOURCING")
+    session.add(opp)
+    session.flush()
+    t = Tender(opportunity_id=opp.id, process_id="99903")
+    session.add(t)
+    session.flush()
+    it = TenderItem(tender_id=t.id, line_no=1, product="UPS 3000VA", qty=1)
+    session.add(it)
+    session.flush()
+    sup = Supplier(name="S2")
+    session.add(sup)
+    session.flush()
+    session.add(
+        SupplierQuote(
+            supplier_id=sup.id,
+            opportunity_id=opp.id,
+            tender_item_id=it.id,
+            product_label="UPS 2500VA",
+            unit_cost=1000.0,
+            qty=1,
+            match_score=15,
+            match_pct=15,
+            match_class=TECH_NO_CUMPLE,
+            technical_status=TECH_NO_CUMPLE,
+            commercial_status="PRECIO_NO_VERIFICADO",
+            verification="NO CUMPLE",
+            url="https://example.local/bad",
+        )
+    )
+    session.commit()
+    offer = PricingAgent(session).process(opp)
+    assert offer.cost_total is None
+    assert offer.precio_objetivo is None
+    assert offer.status == "BLOQUEADO_MATCHING"

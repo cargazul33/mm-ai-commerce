@@ -41,6 +41,12 @@ class BidAgent(BaseAgent):
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"offer_{opp.external_id}.json"
 
+        econ = {}
+        if offer and offer.economic_json:
+            try:
+                econ = json.loads(offer.economic_json)
+            except Exception:
+                econ = {}
         package = {
             "opportunity_id": opp.external_id,
             "title": opp.title,
@@ -55,6 +61,10 @@ class BidAgent(BaseAgent):
             "margin_multiplier": offer.margin_multiplier if offer else settings.margin_multiplier,
             "tax_status": offer.tax_status if offer else "PENDING",
             "logistics_status": offer.logistics_status if offer else "PENDING",
+            "cobertura": econ.get("cobertura"),
+            "costo_verificado": econ.get("costo_verificado"),
+            "costo_pendiente": econ.get("costo_pendiente"),
+            "apto_para_cotizar": econ.get("apto_para_cotizar"),
             "items": [
                 {
                     "description": oi.description,
