@@ -161,12 +161,30 @@ class MatchResult:
     notes: str = ""
     evidence_ok: int = 0
     evidence_total: int = 0
+    tender_item_id: int | None = None
+    candidate_id: str = ""
+    evidence_matrix_key: str = ""
+    hard_requirements: list[dict[str, Any]] = field(default_factory=list)
+    soft_requirements: list[dict[str, Any]] = field(default_factory=list)
+    raw_spec: str = ""
+    normalized_spec: str = ""
 
     def __post_init__(self) -> None:
         if not self.technical_status:
             self.technical_status = self.match_class.replace(" ", "_") if " " in self.match_class else self.match_class
         if not self.evidence_matrix and self.evidence:
             self.evidence_matrix = [e.matrix_row() for e in self.evidence]
+        if self.tender_item_id is not None and self.candidate_id and not self.evidence_matrix_key:
+            self.evidence_matrix_key = f"{self.tender_item_id}::{self.candidate_id}"
+        # Prefix matrix rows with key when isolation ids present
+        if self.evidence_matrix_key and self.evidence_matrix:
+            prefixed = []
+            for row in self.evidence_matrix:
+                if row.startswith(self.evidence_matrix_key + "|"):
+                    prefixed.append(row)
+                else:
+                    prefixed.append(f"{self.evidence_matrix_key}|{row}")
+            self.evidence_matrix = prefixed
         mand = [e for e in self.evidence if e.mandatory]
         if mand and not self.evidence_total:
             self.evidence_total = len(mand)
@@ -188,6 +206,13 @@ class MatchResult:
             "evidence_total": self.evidence_total,
             "blockers": list(self.blockers),
             "notes": self.notes,
+            "tender_item_id": self.tender_item_id,
+            "candidate_id": self.candidate_id,
+            "evidence_matrix_key": self.evidence_matrix_key,
+            "hard_requirements": list(self.hard_requirements),
+            "soft_requirements": list(self.soft_requirements),
+            "raw_spec": self.raw_spec,
+            "normalized_spec": self.normalized_spec,
         }
 
     def to_json(self) -> str:
@@ -381,6 +406,123 @@ def _extract_brand(text: str) -> str:
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+
+@dataclass
+class LineSpec:
+    """Full pliego line extraction — never truncated texts."""
+
+    line_no: int
+    raw_spec: str
+    normalized_spec: str
+    product: str
+    qty: float = 1.0
+    brand: str = ""
+    model: str = ""
+    hard_requirements: list[HardRequirement] = field(default_factory=list)
+    soft_requirements: list[HardRequirement] = field(default_factory=list)
+    product_type: str = TYPE_UNKNOWN
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "line_no": self.line_no,
+            "RAW_SPEC": self.raw_spec,
+            "NORMALIZED_SPEC": self.normalized_spec,
+            "product": self.product,
+            "qty": self.qty,
+            "brand": self.brand,
+            "model": self.model,
+            "product_type": self.product_type,
+            "HARD_REQUIREMENTS": [asdict(r) for r in self.hard_requirements],
+            "SOFT_REQUIREMENTS": [asdict(r) for r in self.soft_requirements],
+        }
+
+
+def normalize_spec(text: str) -> str:
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    t = re.sub(r"FO-\s*(\d+)", r"FO-\1", t, flags=re.I)
+    t = re.sub(r"GLC-\s*FDB-\s*(\d+)-\s*(\d+)", r"GLC-FDB-\1-\2", t, flags=re.I)
+    t = re.sub(r"WI-\s*AP", "WI-AP", t, flags=re.I)
+    return t
+
+
+def extract_soft_requirements(
+    product: str = "",
+    specs: str = "",
+    brand: str = "",
+    model: str = "",
+) -> list[HardRequirement]:
+    """Non-blocking nice-to-haves from pliego (never override hard fail)."""
+    blob = normalize_spec(full_spec_blob(product, specs, brand, model))
+    low = blob.lower()
+    soft: list[HardRequirement] = []
+    ptype = infer_product_type(blob)
+    if ptype == TYPE_AP_INDOOR and re.search(r"wpa\s*?3?", low):
+        soft.append(
+            HardRequirement(
+                key="wifi_security",
+                label="seguridad_wifi",
+                required="WPA/WPA2/WPA3",
+                mandatory=False,
+                kind="text",
+                aliases=["wpa", "wpa2", "wpa3"],
+            )
+        )
+    if ptype == TYPE_AP_OUTDOOR and ("tri-band" in low or "2x2" in low):
+        soft.append(
+            HardRequirement(
+                key="antenna_config",
+                label="antenas",
+                required="tri-band 2x2 / Omni",
+                mandatory=False,
+                kind="text",
+                aliases=["tri-band", "2x2", "omni"],
+            )
+        )
+    if "inyector" in low or "injector" in low:
+        soft.append(
+            HardRequirement(
+                key="poe_injector",
+                label="poe_inyector",
+                required="PoE inyector incluido",
+                mandatory=False,
+                kind="text",
+                aliases=["inyector", "injector", "poe"],
+            )
+        )
+    return soft
+
+
+def build_line_spec(
+    *,
+    line_no: int = 0,
+    product: str = "",
+    specs: str = "",
+    brand: str = "",
+    model: str = "",
+    qty: float = 1.0,
+) -> LineSpec:
+    raw = (specs or product or "").strip()
+    if product and specs and not specs.lower().startswith(product.lower().split(";")[0].lower()[:20]):
+        raw = f"{product}; {specs}".strip()
+    elif product and not specs:
+        raw = product
+    normalized = normalize_spec(raw)
+    hard = extract_hard_requirements(product, normalized, brand, model)
+    soft = extract_soft_requirements(product, normalized, brand, model)
+    return LineSpec(
+        line_no=line_no,
+        raw_spec=raw,
+        normalized_spec=normalized,
+        product=product,
+        qty=qty,
+        brand=brand or _extract_brand(normalized),
+        model=model or ((_extract_model_candidates(normalized) or [""])[0]),
+        hard_requirements=hard,
+        soft_requirements=soft,
+        product_type=infer_product_type(normalized),
+    )
 
 
 def extract_hard_requirements(
@@ -605,8 +747,18 @@ def extract_hard_requirements(
     if ptype == TYPE_AP_INDOOR:
         reqs.append(
             HardRequirement(
+                key="access_point",
+                label="ACCESS_POINT",
+                required="Access Point",
+                mandatory=True,
+                kind="text",
+                aliases=["access point", "punto de acceso", "wi-ap", "ap217", "ap "],
+            )
+        )
+        reqs.append(
+            HardRequirement(
                 key="indoor",
-                label="indoor_outdoor",
+                label="INDOOR",
                 required="interior/indoor",
                 mandatory=True,
                 kind="text",
@@ -620,15 +772,59 @@ def extract_hard_requirements(
                 required="Access Point (no router genérico)",
                 mandatory=True,
                 kind="text",
-                aliases=["access point", "punto de acceso", "wi-ap", "ap217", "ap "],
+                aliases=["access point", "punto de acceso", "wi-ap", "ap217"],
             )
         )
+        if "2.4" in low or "5 ghz" in low or "5ghz" in low:
+            reqs.append(
+                HardRequirement(
+                    key="bands",
+                    label="bandas",
+                    required="2.4 GHz + 5 GHz",
+                    mandatory=True,
+                    kind="text",
+                    aliases=["2.4", "5 ghz", "5ghz", "dual"],
+                )
+            )
+        m_spd = re.search(r"velocidad\s*(\d{2,4}\s*[-–]\s*\d{3,5})\s*mbps", low)
+        if m_spd or "573" in low or "4800" in low:
+            reqs.append(
+                HardRequirement(
+                    key="speed",
+                    label="velocidad",
+                    required=m_spd.group(1).replace(" ", "") + " Mbps" if m_spd else "573-4800 Mbps",
+                    mandatory=True,
+                    kind="text",
+                    aliases=["573", "4800", "mbps"],
+                )
+            )
+        if "lan" in low:
+            reqs.append(
+                HardRequirement(
+                    key="ethernet",
+                    label="ethernet",
+                    required="puerto LAN Ethernet",
+                    mandatory=False,
+                    kind="text",
+                    aliases=["lan", "ethernet", "rj-45", "rj45"],
+                )
+            )
 
     if ptype == TYPE_AP_OUTDOOR:
         reqs.append(
             HardRequirement(
+                key="access_point",
+                label="ACCESS_POINT",
+                required="Access Point / AP",
+                mandatory=True,
+                kind="text",
+                aliases=["access point", "punto de acceso", " ap", "catalyst", "9163"],
+            )
+        )
+        reqs.append(
+            HardRequirement(
                 key="outdoor",
-                label="indoor_outdoor",
+                label="OUTDOOR",
                 required="outdoor/exterior",
                 mandatory=True,
                 kind="text",
@@ -639,22 +835,79 @@ def extract_hard_requirements(
             reqs.append(
                 HardRequirement(
                     key="mgmt_cloud",
-                    label="gestion_cloud",
-                    required="Meraki / nube",
+                    label="CLOUD_MERAKI",
+                    required="Meraki / nube / cloud",
                     mandatory=True,
                     kind="text",
                     aliases=["meraki", "nube", "cloud"],
                 )
             )
-        if "6e" in low or "wifi 6" in low or "wi-fi 6" in low:
+        if "6e" in low or "wifi 6" in low or "wi-fi 6" in low or "802.11ax" in low:
             reqs.append(
                 HardRequirement(
                     key="wifi_tech",
-                    label="tecnologia_wifi",
+                    label="WIFI_6E",
                     required="Wi-Fi 6/6E",
                     mandatory=True,
                     kind="text",
-                    aliases=["wifi 6", "wi-fi 6", "6e", "802.11ax"],
+                    aliases=["wifi 6", "wi-fi 6", "6e", "802.11ax", "w6e"],
+                )
+            )
+        m_spd = re.search(r"(?:velocidad\s*(?:hasta\s*)?)([\d\.]+)\s*mb/?s", low)
+        if m_spd or "3.900" in blob or "3900" in low:
+            spd = m_spd.group(1) if m_spd else "3.900"
+            reqs.append(
+                HardRequirement(
+                    key="speed",
+                    label="velocidad",
+                    required=f"hasta {spd} Mb/s",
+                    mandatory=True,
+                    kind="text",
+                    aliases=["3.900", "3900", "mb/s", "mbps"],
+                )
+            )
+        if "tri-band" in low or "2.4" in low or "banda" in low:
+            reqs.append(
+                HardRequirement(
+                    key="bands",
+                    label="bandas",
+                    required="tri-band / multi-band",
+                    mandatory=True,
+                    kind="text",
+                    aliases=["tri-band", "2.4", "5 ghz", "6e", "multiband"],
+                )
+            )
+        if "ethernet" in low or "rj-45" in low or "rj45" in low or "multigigabit" in low:
+            reqs.append(
+                HardRequirement(
+                    key="ethernet",
+                    label="ethernet",
+                    required="Ethernet Multigigabit RJ-45",
+                    mandatory=True,
+                    kind="text",
+                    aliases=["ethernet", "rj-45", "rj45", "multigigabit", "2.5 gbps"],
+                )
+            )
+        if "poe" in low or "802.3at" in low or "upoe" in low:
+            reqs.append(
+                HardRequirement(
+                    key="poe",
+                    label="PoE",
+                    required="PoE+ / UPoE",
+                    mandatory=True,
+                    kind="text",
+                    aliases=["poe", "poe+", "802.3at", "upoe"],
+                )
+            )
+        if "lic-mr" in low or "licencia" in low or "essentials" in low or "36 meses" in low:
+            reqs.append(
+                HardRequirement(
+                    key="license",
+                    label="licencia_meraki",
+                    required="LIC-MR-E Meraki Essentials 36 meses",
+                    mandatory=True,
+                    kind="text",
+                    aliases=["lic-mr-e", "licencia", "essentials", "36 meses", "subscription"],
                 )
             )
 
@@ -743,20 +996,20 @@ def evaluate_match(
         blockers.append(f"PRODUCT_TYPE_MISMATCH:{need_type}->{found_type}")
 
     if not found_blob.strip():
-        # still emit product_type evidence
+        # Emit FULL hard requirements as NO_VERIFICADO (never truncate matrix to 0/1)
         for req in requirements:
-            if req.key == "product_type":
-                evidence.append(
-                    AttrEvidence(
-                        key=req.key,
-                        label=req.label,
-                        required=req.required,
-                        found="sin evidencia",
-                        source_url=source_url,
-                        result="NO_VERIFICADO",
-                        mandatory=True,
-                    )
+            evidence.append(
+                AttrEvidence(
+                    key=req.key,
+                    label=req.label,
+                    required=req.required,
+                    found="sin evidencia",
+                    source_url=source_url or "",
+                    result="NO_VERIFICADO",
+                    mandatory=req.mandatory,
                 )
+            )
+        mand = [e for e in evidence if e.mandatory]
         return MatchResult(
             match_pct=0,
             match_class=TECH_NO_VER,
@@ -768,7 +1021,10 @@ def evaluate_match(
             category_found=_TYPE_TO_CAT.get(found_type, ""),
             evidence=evidence,
             blockers=["SIN_EVIDENCIA"],
-            notes="sin texto de proveedor",
+            notes="sin texto de proveedor — hard reqs incompletos/no verificados",
+            evidence_ok=0,
+            evidence_total=len(mand),
+            hard_requirements=[asdict(r) for r in requirements],
         )
 
     # --- PRODUCT_TYPE FIRST ---
@@ -1170,10 +1426,41 @@ def match_line_to_candidate(
     stock: str = "",
     shipping_neuquen: str = "",
     qty_needed: float = 1.0,
+    tender_item_id: int | None = None,
+    candidate_id: str = "",
+    line_no: int = 0,
 ) -> MatchResult:
-    need = full_spec_blob(product, specs, brand, model)
-    reqs = extract_hard_requirements(product, specs, brand, model)
-    return evaluate_match(
+    """Match one candidate to one line — never reuse classification across lines.
+
+    tender_item_id is mandatory in production sourcing (isolation).
+    candidate_id must be unique per candidate.
+    """
+    line = build_line_spec(
+        line_no=line_no,
+        product=product,
+        specs=specs,
+        brand=brand,
+        model=model,
+        qty=qty_needed,
+    )
+    need = line.normalized_spec
+    reqs = list(line.hard_requirements)
+    soft = list(line.soft_requirements)
+    # Deep-copy reqs so callers cannot mutate shared state across lines
+    reqs = [
+        HardRequirement(
+            key=r.key,
+            label=r.label,
+            required=r.required,
+            mandatory=r.mandatory,
+            kind=r.kind,
+            numeric_value=r.numeric_value,
+            numeric_unit=r.numeric_unit,
+            aliases=list(r.aliases or []),
+        )
+        for r in reqs
+    ]
+    result = evaluate_match(
         reqs,
         candidate_title=candidate_title,
         candidate_text=candidate_text or candidate_title,
@@ -1184,3 +1471,16 @@ def match_line_to_candidate(
         shipping_neuquen=shipping_neuquen,
         qty_needed=qty_needed,
     )
+    # Attach isolation + full pliego extraction (fresh copies — no shared refs)
+    result.tender_item_id = tender_item_id
+    result.candidate_id = candidate_id or ""
+    if tender_item_id is not None and result.candidate_id:
+        result.evidence_matrix_key = f"{tender_item_id}::{result.candidate_id}"
+        # Re-prefix matrix now that key is known
+        raw_rows = [e.matrix_row() for e in result.evidence]
+        result.evidence_matrix = [f"{result.evidence_matrix_key}|{row}" for row in raw_rows]
+    result.hard_requirements = [asdict(r) for r in reqs]
+    result.soft_requirements = [asdict(r) for r in soft]
+    result.raw_spec = line.raw_spec
+    result.normalized_spec = line.normalized_spec
+    return result

@@ -47,7 +47,8 @@ ITEM_LABEL = re.compile(
 
 BRAND_RE = re.compile(
     r"\b(HP|Dell|Lenovo|Epson|Brother|Cisco|Samsung|LG|Acer|Canon|Logitech|"
-    r"TP-?LINK|TP\s*Link|GLC|ZOLODA|LYONN|Omada)\b",
+    r"TP-?LINK|TP\s*Link|GLC|Glc|ZOLODA|LYONN|Omada|Atomlux|Wi-?Tek|WiTek|"
+    r"Meraki|Ericsson|PowerFiber|Katech)\b",
     re.I,
 )
 
@@ -85,6 +86,14 @@ def _model_from(text: str) -> str:
 
 
 def _brand_from(text: str) -> str:
+    # Prefer Marca Sugerida (mandatory commercial brand) over Marca Equipo noise
+    m = re.search(
+        r"marca\s+sugerida\s*:\s*(?!ninguna)(TP-?Link|Atomlux|GLC|Glc|Wi-?Tek|Cisco|Ericsson|Omada|Meraki|PowerFiber)",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1)
     m = BRAND_RE.search(text)
     return m.group(1) if m else ""
 
@@ -98,19 +107,108 @@ def extract_line_items(text: str, *, max_items: int = 40) -> list[dict[str, Any]
     flattened = _flatten_safipro_blocks(text)
     found = _from_safipro(flattened)
     if found:
+        found = _enrich_from_descripcion_annex(text, found)
+        found = [_finalize_item(it) for it in found]
         return found[:max_items]
 
     found = _from_numbered(text)
     if found:
-        return found[:max_items]
+        return [_finalize_item(it) for it in found][:max_items]
 
     found = _from_item_label(text)
     if found:
-        return found[:max_items]
+        return [_finalize_item(it) for it in found][:max_items]
 
     # Anexo descripción sin qty — solo si hay renglones claros con ";" (SAFIPRO style)
     found = _from_descripcion_annex(text)
-    return found[:max_items]
+    return [_finalize_item(it) for it in found][:max_items]
+
+
+def _finalize_item(it: dict[str, Any]) -> dict[str, Any]:
+    """Attach RAW_SPEC / NORMALIZED_SPEC / HARD / SOFT — never truncate."""
+    from mm_commerce.matching import build_line_spec, normalize_spec
+
+    specs = (it.get("specs") or it.get("product") or "").strip()
+    # Normalize FO- 4075 etc. inside stored specs
+    specs = normalize_spec(specs)
+    it["specs"] = specs
+    line = build_line_spec(
+        line_no=int(it.get("line_no") or 0),
+        product=it.get("product") or "",
+        specs=specs,
+        brand=it.get("brand") or "",
+        model=it.get("model") or "",
+        qty=float(it.get("qty") or 1),
+    )
+    if not it.get("brand"):
+        it["brand"] = line.brand
+    if not it.get("model"):
+        it["model"] = line.model
+    it["RAW_SPEC"] = line.raw_spec
+    it["NORMALIZED_SPEC"] = line.normalized_spec
+    it["HARD_REQUIREMENTS"] = [__import__("dataclasses").asdict(r) for r in line.hard_requirements]
+    it["SOFT_REQUIREMENTS"] = [__import__("dataclasses").asdict(r) for r in line.soft_requirements]
+    it["product_type"] = line.product_type
+    return it
+
+
+def _enrich_from_descripcion_annex(text: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge Descripcion annex continuations (e.g. Meraki license after page break) into rows."""
+    if not items:
+        return items
+    m = re.search(r"(?is)\bDescripcion\b(.*)$", text)
+    if not m:
+        # Still try to attach license blob if present
+        desc_section = ""
+    else:
+        desc_section = m.group(1)
+
+    license_parts: list[str] = []
+    for mlic in re.finditer(
+        r"(?is)Se solicita la contrataci[oó]n de la licencia.{0,400}",
+        text,
+    ):
+        license_parts.append(re.sub(r"\s+", " ", mlic.group(0)).strip())
+    for mlic in re.finditer(r"(?is)\bLIC-MR-[A-Z]\b.{0,200}", text):
+        license_parts.append(re.sub(r"\s+", " ", mlic.group(0)).strip())
+    license_blob = " ".join(dict.fromkeys(license_parts))
+
+    by_ren: dict[int, str] = {}
+    if desc_section:
+        row_re = re.compile(
+            r"(?m)^\s*(?P<ren>\d{1,3})\s+"
+            r"(?P<body>[A-ZÁÉÍÓÚÑÜ][\s\S]*?)(?=^\s*\d{1,3}\s+[A-ZÁÉÍÓÚÑÜ]|\Z)"
+        )
+        for mr in row_re.finditer(desc_section):
+            ren = int(mr.group("ren"))
+            body = re.sub(r"\s+", " ", mr.group("body")).strip()
+            body = re.sub(r"(?i)tracto sucesivo:.*?(?=--|\Z)", " ", body)
+            body = re.sub(r"-{5,}Detalle-{5,}", " ", body)
+            body = re.sub(r"\s+", " ", body).strip()
+            if len(body) > 20:
+                by_ren[ren] = body
+
+    max_ren = max(int(i["line_no"]) for i in items)
+    out: list[dict[str, Any]] = []
+    for it in items:
+        ren = int(it["line_no"])
+        specs = it.get("specs") or ""
+        annex = by_ren.get(ren, "")
+        merged = specs
+        if annex:
+            for token in ("LIC-MR", "licencia", "36 meses", "antenas", "inyector", "Essentials"):
+                if token.lower() in annex.lower() and token.lower() not in merged.lower():
+                    merged = f"{merged} | ANEXO: {annex}"
+                    break
+        if ren == max_ren and license_blob:
+            if "lic-mr" in license_blob.lower() and "lic-mr" not in merged.lower():
+                merged = f"{merged} | {license_blob}"
+        it2 = dict(it)
+        it2["specs"] = merged
+        it2["brand"] = it2.get("brand") or _brand_from(merged)
+        it2["model"] = it2.get("model") or _model_from(merged)
+        out.append(it2)
+    return out
 
 
 def _flatten_safipro_blocks(text: str) -> str:
