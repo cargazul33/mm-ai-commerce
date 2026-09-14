@@ -116,16 +116,42 @@ class PricingAgent(BaseAgent):
             if commercial_ok_lines
             else 0.0
         )
-        # Full offer only when ALL lines tech+commercial ready
-        full_ok = (
-            tender is not None
-            and lines_total > 0
-            and cobertura_tech == lines_total
-            and cobertura_comm == lines_total
-            and not pending
-        )
+        bid_scope = {}
+        if tender and getattr(tender, "bid_scope_json", None):
+            try:
+                bid_scope = json.loads(tender.bid_scope_json or "{}")
+            except Exception:
+                bid_scope = {}
+        scope_state = bid_scope.get("state") or "UNKNOWN"
+        # TOTAL_REQUIRED → need all lines; ITEM_LEVEL → any ready line is cotizable
+        if scope_state == "ITEM_LEVEL_ALLOWED":
+            full_ok = (
+                tender is not None
+                and lines_total > 0
+                and cobertura_comm >= 1
+            )
+        elif scope_state == "TOTAL_REQUIRED":
+            full_ok = (
+                tender is not None
+                and lines_total > 0
+                and cobertura_tech == lines_total
+                and cobertura_comm == lines_total
+                and not pending
+            )
+        else:
+            # Legacy / missing scope: keep TOTAL_REQUIRED economics (verifier still blocks UNKNOWN)
+            full_ok = (
+                tender is not None
+                and lines_total > 0
+                and cobertura_tech == lines_total
+                and cobertura_comm == lines_total
+                and not pending
+            )
 
-        merchandise = costo_confirmado if full_ok else None
+        merchandise = costo_confirmado if (full_ok or (scope_state == "ITEM_LEVEL_ALLOWED" and cobertura_comm >= 1)) else None
+        if scope_state == "ITEM_LEVEL_ALLOWED" and cobertura_comm >= 1:
+            # partial offer economics on ready lines only
+            pass
         logistics = None
         logistics_status = "PENDING"
         total = merchandise
@@ -138,7 +164,7 @@ class PricingAgent(BaseAgent):
         note = (
             f"COBERTURA_TECNICA {cobertura_tech}/{lines_total}; "
             f"COBERTURA_COMERCIAL {cobertura_comm}/{lines_total}; "
-            f"apto={'SI' if full_ok else 'NO'}"
+            f"scope={scope_state}; apto={'SI' if full_ok else 'NO'}"
         )
 
         offer = Offer(
@@ -184,7 +210,10 @@ class PricingAgent(BaseAgent):
             for it in tender.items:
                 q = best_by_item.get(it.id)
                 tech = (q.technical_status if q else "") or (q.match_class if q else TECH_NO_VER)
-                if q and q in commercial_ok_lines and full_ok:
+                item_ready = q is not None and q in commercial_ok_lines and (
+                    full_ok or scope_state == "ITEM_LEVEL_ALLOWED"
+                )
+                if item_ready:
                     self.session.add(
                         OfferItem(
                             offer_id=offer.id,

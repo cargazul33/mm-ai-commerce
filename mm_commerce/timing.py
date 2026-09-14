@@ -37,6 +37,25 @@ def parse_cierre(value: str | None) -> datetime | None:
     s = str(value).strip()
     if not s or s.startswith("  /  /") or s in {"—", "-", "N/D", "ND"}:
         return None
+    # ISO first — avoid matching 26-09-21 inside 2026-09-21 as dd/mm/yy
+    iso = re.match(
+        r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})"
+        r"(?:[T ](?P<H>\d{2}):(?P<M>\d{2})(?::(?P<S>\d{2}))?)?",
+        s,
+    )
+    if iso:
+        try:
+            return datetime(
+                int(iso.group("y")),
+                int(iso.group("m")),
+                int(iso.group("d")),
+                int(iso.group("H") or 0),
+                int(iso.group("M") or 0),
+                int(iso.group("S") or 0),
+                tzinfo=TZ_BA,
+            )
+        except ValueError:
+            return None
     m = _DT_RE.search(s)
     if not m:
         return None

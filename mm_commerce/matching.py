@@ -115,6 +115,77 @@ _TYPE_TO_CAT = {
 VERIFIED_CLASSES = VERIFIED_TECH
 BLOCKING_CLASSES = BLOCKING_TECH
 
+INTERNAL_VALIDATION_ERROR = "INTERNAL_VALIDATION_ERROR"
+
+
+def summarize_evidence_counts(evidence: list[AttrEvidence]) -> dict[str, int | str | None]:
+    """Mandatory hard-req evidence only. total MUST equal pass+fail+unknown."""
+    mand = [e for e in evidence if e.mandatory]
+    pass_count = sum(1 for e in mand if e.result == "CUMPLE")
+    fail_count = sum(1 for e in mand if e.result == "NO_CUMPLE")
+    unknown_count = sum(
+        1 for e in mand if e.result not in ("CUMPLE", "NO_CUMPLE", "N/A")
+    )
+    # N/A mandatory is pathological — count as unknown for identity
+    na_count = sum(1 for e in mand if e.result == "N/A")
+    unknown_count += na_count
+    total = len(mand)
+    ok = total == pass_count + fail_count + unknown_count
+    return {
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "unknown_count": unknown_count,
+        "hard_requirements_total": total,
+        "consistent": ok,
+        "validation_error": None if ok else INTERNAL_VALIDATION_ERROR,
+    }
+
+
+def validate_evidence_consistency(
+    *,
+    evidence: list[AttrEvidence],
+    hard_requirements: list | None = None,
+    evidence_ok: int | None = None,
+    evidence_total: int | None = None,
+) -> dict[str, int | str | None | bool]:
+    """Enforce hard_requirements_total == pass+fail+unknown; else INTERNAL_VALIDATION_ERROR."""
+    summary = summarize_evidence_counts(evidence)
+    hard = hard_requirements or []
+    # hard list may be dicts or HardRequirement
+    hard_mand = []
+    for h in hard:
+        if isinstance(h, dict):
+            if h.get("mandatory", True):
+                hard_mand.append(h)
+        else:
+            if getattr(h, "mandatory", True):
+                hard_mand.append(h)
+    listed = len(hard_mand) if hard_mand else summary["hard_requirements_total"]
+    errors: list[str] = []
+    if not summary["consistent"]:
+        errors.append(INTERNAL_VALIDATION_ERROR)
+    if listed != summary["hard_requirements_total"]:
+        errors.append(INTERNAL_VALIDATION_ERROR)
+        summary["consistent"] = False
+        summary["validation_error"] = INTERNAL_VALIDATION_ERROR
+    if evidence_total is not None and evidence_total != summary["hard_requirements_total"]:
+        errors.append(INTERNAL_VALIDATION_ERROR)
+        summary["consistent"] = False
+        summary["validation_error"] = INTERNAL_VALIDATION_ERROR
+    if evidence_ok is not None and evidence_ok != summary["pass_count"]:
+        # soft drift — still block if fraction mismatches listed
+        if evidence_ok + summary["fail_count"] + summary["unknown_count"] != summary["hard_requirements_total"]:
+            errors.append(INTERNAL_VALIDATION_ERROR)
+            summary["consistent"] = False
+            summary["validation_error"] = INTERNAL_VALIDATION_ERROR
+    summary["listed_hard_mandatory"] = listed
+    summary["errors"] = errors
+    if errors:
+        summary["validation_error"] = INTERNAL_VALIDATION_ERROR
+        summary["consistent"] = False
+    return summary
+
+
 
 @dataclass
 class HardRequirement:
@@ -168,6 +239,11 @@ class MatchResult:
     soft_requirements: list[dict[str, Any]] = field(default_factory=list)
     raw_spec: str = ""
     normalized_spec: str = ""
+    pass_count: int = 0
+    fail_count: int = 0
+    unknown_count: int = 0
+    hard_requirements_total: int = 0
+    validation_error: str | None = None
 
     def __post_init__(self) -> None:
         if not self.technical_status:
@@ -189,6 +265,28 @@ class MatchResult:
         if mand and not self.evidence_total:
             self.evidence_total = len(mand)
             self.evidence_ok = sum(1 for e in mand if e.result == "CUMPLE")
+        # Always refresh consistency counts
+        summary = summarize_evidence_counts(self.evidence)
+        self.pass_count = int(summary["pass_count"])
+        self.fail_count = int(summary["fail_count"])
+        self.unknown_count = int(summary["unknown_count"])
+        self.hard_requirements_total = int(summary["hard_requirements_total"])
+        if self.evidence_total and self.evidence_total != self.hard_requirements_total:
+            # prefer mandatory len as source of truth
+            self.evidence_total = self.hard_requirements_total
+            self.evidence_ok = self.pass_count
+        elif not self.evidence_total:
+            self.evidence_total = self.hard_requirements_total
+            self.evidence_ok = self.pass_count
+        check = validate_evidence_consistency(
+            evidence=self.evidence,
+            hard_requirements=self.hard_requirements,
+            evidence_ok=self.evidence_ok,
+            evidence_total=self.evidence_total,
+        )
+        self.validation_error = check.get("validation_error")  # type: ignore[assignment]
+        if self.validation_error and self.validation_error not in self.blockers:
+            self.blockers = list(self.blockers) + [str(self.validation_error)]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -213,6 +311,11 @@ class MatchResult:
             "soft_requirements": list(self.soft_requirements),
             "raw_spec": self.raw_spec,
             "normalized_spec": self.normalized_spec,
+            "pass_count": self.pass_count,
+            "fail_count": self.fail_count,
+            "unknown_count": self.unknown_count,
+            "hard_requirements_total": self.hard_requirements_total,
+            "validation_error": self.validation_error,
         }
 
     def to_json(self) -> str:
@@ -509,8 +612,11 @@ def build_line_spec(
     elif product and not specs:
         raw = product
     normalized = normalize_spec(raw)
-    hard = extract_hard_requirements(product, normalized, brand, model)
+    hard_all = extract_hard_requirements(product, normalized, brand, model)
     soft = extract_soft_requirements(product, normalized, brand, model)
+    # Hard list = mandatory ONLY (fixes R1 7 listed vs 6/6 evidence)
+    hard = [r for r in hard_all if r.mandatory]
+    soft = list(soft) + [r for r in hard_all if not r.mandatory]
     return LineSpec(
         line_no=line_no,
         raw_spec=raw,
@@ -928,15 +1034,17 @@ def classify_commercial(
         return COMM_PRECIO_NO_VER
     if stock_s in ("0", "OutOfStock", "sin stock") or stock_s.lower() == "sin stock":
         return COMM_SIN_STOCK
-    # numeric stock
-    try:
-        n = float(re.sub(r"[^\d.]", "", stock_s) or "nan")
-        if n == 0:
-            return COMM_SIN_STOCK
-        if n < qty_needed:
-            return COMM_STOCK_INSUF
-    except ValueError:
-        pass
+    # numeric stock (only when digits present — avoid float("nan") traps)
+    digits = re.sub(r"[^\d.]", "", stock_s)
+    if digits and re.search(r"\d", digits):
+        try:
+            n = float(digits)
+            if n == 0:
+                return COMM_SIN_STOCK
+            if n < qty_needed:
+                return COMM_STOCK_INSUF
+        except ValueError:
+            pass
     if not ship or ship.upper() in ("NO VERIFICADO", "NO_VERIFICADO", ""):
         # price+stock ok but envío unknown
         if stock_s and stock_s.upper() not in ("NO VERIFICADO", "NO_VERIFICADO", ""):
@@ -1483,4 +1591,20 @@ def match_line_to_candidate(
     result.soft_requirements = [asdict(r) for r in soft]
     result.raw_spec = line.raw_spec
     result.normalized_spec = line.normalized_spec
+    # Re-validate after attaching hard_requirements (post-init ran earlier)
+    check = validate_evidence_consistency(
+        evidence=result.evidence,
+        hard_requirements=result.hard_requirements,
+        evidence_ok=result.evidence_ok,
+        evidence_total=result.evidence_total,
+    )
+    result.pass_count = int(check["pass_count"])
+    result.fail_count = int(check["fail_count"])
+    result.unknown_count = int(check["unknown_count"])
+    result.hard_requirements_total = int(check["hard_requirements_total"])
+    result.evidence_ok = result.pass_count
+    result.evidence_total = result.hard_requirements_total
+    result.validation_error = check.get("validation_error")  # type: ignore[assignment]
+    if result.validation_error and result.validation_error not in result.blockers:
+        result.blockers = list(result.blockers) + [str(result.validation_error)]
     return result

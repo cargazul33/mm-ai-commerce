@@ -118,6 +118,103 @@ def _strip_html(html: str) -> str:
     return re.sub(r"\s+", " ", text).strip()[:8000]
 
 
+
+def _decode_js_str(s: str) -> str:
+    try:
+        return bytes(s, "utf-8").decode("unicode_escape")
+    except Exception:
+        return s.replace("\\u0020", " ").replace("\\/", "/")
+
+
+def _from_tiendanube(html: str) -> dict[str, Any] | None:
+    """Prefer LS.product + LS.variants over related-product LD+JSON."""
+    if "LS.product" not in (html or ""):
+        return None
+    name = ""
+    m = re.search(r"LS\.product\s*=\s*\{[\s\S]*?name\s*:\s*'((?:\\'|[^'])*)'", html)
+    if m:
+        name = _decode_js_str(m.group(1))
+    brand = ""
+    m = re.search(r"LS\.product\s*=\s*\{[\s\S]*?brand:\s*'((?:\\'|[^'])*)'", html)
+    if m:
+        brand = _decode_js_str(m.group(1))
+    price = None
+    stock = "NO VERIFICADO"
+    m = re.search(r"LS\.variants\s*=\s*(\[[\s\S]*?\]);", html)
+    if m:
+        try:
+            variants = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            variants = []
+        if variants and isinstance(variants, list):
+            v0 = variants[0] if isinstance(variants[0], dict) else {}
+            if v0.get("price_number") is not None:
+                try:
+                    price = float(v0["price_number"])
+                except (TypeError, ValueError):
+                    price = None
+            if v0.get("stock") is not None:
+                stock = str(v0.get("stock"))
+            elif v0.get("available") is False:
+                stock = "0"
+            elif v0.get("available") is True:
+                stock = "InStock"
+    if not name and price is None:
+        return None
+    return {
+        "title": name,
+        "price": price,
+        "stock": stock,
+        "seller": "",
+        "brand": brand,
+        "description": name,
+    }
+
+
+def _page_h1_title(html: str) -> str:
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", html or "", re.I | re.S)
+    if m:
+        return re.sub(r"<[^>]+>", "", m.group(1)).strip()
+    m = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.I | re.S)
+    if m:
+        return re.sub(r"<[^>]+>", "", m.group(1)).strip()
+    return ""
+
+
+def _ld_match_title(ld_items: list[dict[str, Any]], title: str, url: str) -> dict[str, Any] | None:
+    """Pick LD Product matching page H1/URL — never related-product noise."""
+    if not ld_items:
+        return None
+    title_l = (title or "").lower()
+    slug = url.rstrip("/").split("/")[-1].lower().replace("-", " ")
+    slug_toks = [t for t in slug.split() if len(t) > 3]
+
+    def score(item: dict[str, Any]) -> int:
+        name = (item.get("title") or "").lower()
+        s = 0
+        if title_l and name == title_l:
+            s += 200
+        if title_l and title_l[:30] and title_l[:30] in name:
+            s += 100
+        if title_l and name[:30] and name[:30] in title_l:
+            s += 80
+        for tok in slug_toks:
+            if tok in name:
+                s += 8
+        # penalize obvious related mismatches vs slug
+        if "3500" in slug and "2500" in name:
+            s -= 100
+        if "fdb-012" in slug.replace(" ", "-") or "fdb 012" in slug:
+            if "soporte" in name or "fijacion" in name or "fijación" in name:
+                s -= 100
+        return s
+
+    ranked = sorted(ld_items, key=score, reverse=True)
+    best = ranked[0]
+    if score(best) >= 50:
+        return best
+    return None
+
 def fetch_product_page(url: str, *, timeout: float = 25.0) -> dict[str, Any]:
     """Fetch a public product URL and extract price/stock evidence."""
     verified_at = now_ba().isoformat(timespec="seconds")
@@ -134,29 +231,38 @@ def fetch_product_page(url: str, *, timeout: float = 25.0) -> dict[str, Any]:
                     "verified_at": verified_at,
                 }
             html = r.text
-            ld = _from_ld_json(html)
+            page_url = str(r.url)
+            title = _page_h1_title(html)
             price = None
-            title = ""
             description = ""
             stock = "NO VERIFICADO"
             seller = ""
-            if ld:
-                best = next((x for x in ld if x.get("price")), ld[0])
-                price = best.get("price")
-                title = best.get("title") or ""
-                description = best.get("description") or ""
-                stock = best.get("stock") or stock
-                seller = best.get("seller") or ""
-            # Prefer <title> / h1 if ld title empty or suspicious
-            if not title:
-                m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.I | re.S)
-                if m:
-                    title = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-                else:
-                    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-                    if m:
-                        title = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            # 1) Tiendanube main product (never related-item LD)
+            tn = _from_tiendanube(html)
+            if tn:
+                if tn.get("title"):
+                    title = tn["title"] or title
+                if tn.get("price") is not None:
+                    price = tn["price"]
+                if tn.get("stock"):
+                    stock = tn["stock"]
+                description = tn.get("description") or description
+            # 2) LD+JSON only if it matches H1/URL
+            ld = _from_ld_json(html)
+            matched = _ld_match_title(ld, title, page_url)
+            if matched:
+                if price is None and matched.get("price") is not None:
+                    price = matched.get("price")
+                if not title:
+                    title = matched.get("title") or title
+                description = description or matched.get("description") or ""
+                if stock == "NO VERIFICADO" and matched.get("stock"):
+                    stock = matched.get("stock") or stock
+                seller = matched.get("seller") or seller
             raw_text = _strip_html(html)
+            # Keep H1/title + raw_text dominant for matching (avoid related-product titles)
+            if title:
+                raw_text = f"{title} {raw_text}"[:8000]
             if price is None:
                 for m in re.finditer(
                     r"(?:transferencia|efectivo|especial)[^\$]{0,40}\$\s*([\d\.\,]+)",
@@ -167,11 +273,29 @@ def fetch_product_page(url: str, *, timeout: float = 25.0) -> dict[str, Any]:
                     if price and price > 100:
                         break
             if price is None:
+                # last resort: large price near title tokens / H1 block
+                title_toks = [t for t in re.split(r"\W+", title.lower()) if len(t) > 3][:6]
+                strong = [t for t in title_toks if any(c.isdigit() for c in t) or t in {"meraki", "atomlux", "splitter", "outdoor"}]
                 for m in PRICE_RE.finditer(html):
                     cand = _parse_ars(m.group(1))
-                    if cand and cand >= 1000:
+                    if not cand or cand < 1000:
+                        continue
+                    window = html[max(0, m.start() - 500) : m.end() + 120].lower()
+                    hits = sum(1 for tok in title_toks if tok in window)
+                    strong_hit = any(tok in window for tok in strong)
+                    if hits >= 2 or (strong_hit and hits >= 1):
                         price = cand
                         break
+                if price is None and title:
+                    # price in first 2500 chars after H1
+                    hm = re.search(r"<h1[^>]*>.*?</h1>", html or "", re.I | re.S)
+                    if hm:
+                        chunk = html[hm.end() : hm.end() + 2500]
+                        for m in PRICE_RE.finditer(chunk):
+                            cand = _parse_ars(m.group(1))
+                            if cand and cand >= 1000:
+                                price = cand
+                                break
             if "sin stock" in html.lower() or "out of stock" in html.lower():
                 if stock == "NO VERIFICADO":
                     stock = "0"
@@ -185,7 +309,7 @@ def fetch_product_page(url: str, *, timeout: float = 25.0) -> dict[str, Any]:
                 ship = "envío nacional mencionado — cotizar a Neuquén"
             return {
                 "ok": True,
-                "url": str(r.url),
+                "url": page_url,
                 "title": title,
                 "description": description,
                 "raw_text": raw_text,
@@ -221,20 +345,24 @@ SEED_CATALOG: list[dict[str, Any]] = [
     },
     {
         "categories": {"ups_estabilizador"},
-        "require_any": ("ups3500", "ups 3500", "3000 va", "3000va", "atomlux"),
+        "require_any": ("ups3500", "ups 3500", "3500va", "3000 va", "3000va", "atomlux"),
+        "forbid": ("2500va", "2500 va", "ups2500"),
         "urls": [
             "https://depot.com.ar/productos/ups-estabilizador-de-tension-atomlux-ups3500-3500va-220v-ca-negro/",
+            "https://depot.com.ar/productos/ups-atomlux-3000va-estabilizador-6-salidas-soft-de-apagado-1sl2o/",
         ],
         "seller": "Computers Depot",
     },
     {
         "categories": {"odf_caja_empalme"},
-        "require_any": ("odf", "caja de empalme", "12 puertos"),
-        "forbid": ("splitter", "1x16", "fo-4075", "caja nap", "soporte"),
+        "require_any": ("odf", "caja de empalme", "12 puertos", "pachera"),
+        "forbid": ("splitter 1x16", "fo-4075", "caja nap", "soporte", "fijacion"),
         "urls": [
-            # Public ODF listings are scarce; leave empty → NO VERIFICADO rather than wrong category
+            "https://todoconectores.ar/product/odf-pachera-fibra-optica-conectorizada-sc-apc-12-puertos/",
+            "https://dyrsistemas.com.ar/lifefiber-bandeja-odf-12-f-scapc-pig-con-cuplas-incorporadas-3046",
+            "https://provetel.com.ar/producto/odf-de-12-puertos-con-cuplas-incorporadas/",
         ],
-        "seller": "",
+        "seller": "Todoconectores/DYR/Provetel",
     },
     {
         "categories": {"splitter_plc"},
@@ -247,24 +375,31 @@ SEED_CATALOG: list[dict[str, Any]] = [
     },
     {
         "categories": {"caja_nap"},
-        "require_any": ("fdb-012", "glc-fdb", "caja nap", "1x8"),
-        "forbid": ("soporte", "fijación", "fijacion", "mount"),
+        "require_any": ("fdb-012", "glc-fdb", "caja nap", "1x8", "fttb"),
+        "forbid": ("soporte", "fijación", "fijacion", "mount", "bracket"),
         "urls": [
             "https://tienda.sawerin.com.ar/productos/glc-fdb-012-01-caja-interior-ftth-fttb-1x8-sc-apc/",
+            "https://www.glctec.com/fdb-fdb-caja-interior-ftth-1x8-sc-apc-fttb--det--GLC-FDB-012-01",
         ],
-        "seller": "Sawerin Networks",
+        "seller": "Sawerin/GLC",
     },
     {
         "categories": {"access_point_indoor"},
         "require_any": ("wi-ap217", "ap217", "access point interior", "wi-tek"),
-        "urls": [],
-        "seller": "",
+        "urls": [
+            "https://www.biosegur.com.ar/wi-tek-wi-ap217-lite-access-point-para-montaje-en-cielorrasos-con-administracion-centralizada-witek-witec--det--P2360",
+            "https://www.wireless-tek.com/product_show.php?id=122",
+        ],
+        "seller": "Biosegur/Wi-Tek",
     },
     {
         "categories": {"access_point_outdoor"},
-        "require_any": ("9163e", "meraki", "catalyst 9163", "wifi 6e outdoor"),
-        "urls": [],
-        "seller": "",
+        "require_any": ("9163e", "cw9163", "meraki", "catalyst 9163", "wifi 6e outdoor"),
+        "urls": [
+            "https://nanotec.com.ar/productos/access-point-cisco-meraki-cw9163e-outdoor-wifi-6e-ethernet-multigigabit-tri-radio-157ad/",
+            "https://www.cisco-meraki.com.mx/product/wi-fi-6e-para-exteriores-gestionado-en-la-nube-cw9163e/",
+        ],
+        "seller": "Nanotec/Meraki LATAM",
     },
 ]
 

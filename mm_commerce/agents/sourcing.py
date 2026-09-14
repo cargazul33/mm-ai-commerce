@@ -29,28 +29,28 @@ from mm_commerce.timing import now_ba
 
 
 def _search_strategies(line_spec) -> list[tuple[str, str]]:
-    """Up to 5 distinct strategies derived from HARD_REQUIREMENTS (no new sources)."""
+    """Up to 10 distinct strategies — priority: OEM/dist → AR wholesale → integrator → ecommerce → marketplace."""
     hard = {r.key: r for r in line_spec.hard_requirements}
     brand = line_spec.brand or ""
     model = line_spec.model or ""
     ptype = line_spec.product_type
+    norm = line_spec.normalized_spec or ""
     strategies: list[tuple[str, str]] = []
 
-    # 1) Tech description / full normalized
-    strategies.append(("tech_desc", line_spec.normalized_spec[:240]))
-
-    # 2) Brand + model
+    # 1) Official manufacturer / exact model
     if brand or model:
-        strategies.append(("brand_model", f"{brand} {model} {ptype}".strip()))
-
-    # 3) Official distributor seeds (category via full hard blob)
+        strategies.append(("oem_exact", f"{brand} {model}".strip()[:160]))
+    # 2) Tech description / full normalized
+    strategies.append(("tech_desc", norm[:240]))
+    # 3) Brand + model + type
+    strategies.append(("brand_model", f"{brand} {model} {ptype}".strip()[:160]))
+    # 4) Official distributor seed query
     seed_q_parts = [ptype.replace("_", " ")]
-    for key in ("model", "brand", "split_ratio", "nap_identity", "wifi_tech", "capacity_va"):
+    for key in ("model", "brand", "split_ratio", "nap_identity", "wifi_tech", "capacity_va", "ports"):
         if key in hard:
             seed_q_parts.append(hard[key].required)
     strategies.append(("official_dist", " ".join(seed_q_parts)[:200]))
-
-    # 4) AR wholesalers (ML-oriented short query)
+    # 5) AR wholesaler short query
     ml_bits = [brand, model]
     if "split_ratio" in hard:
         ml_bits.append(hard["split_ratio"].required)
@@ -59,28 +59,49 @@ def _search_strategies(line_spec) -> list[tuple[str, str]]:
     if ptype:
         ml_bits.append(ptype.replace("_", " "))
     strategies.append(("ar_wholesale", " ".join(x for x in ml_bits if x)[:120]))
-
-    # 5) Nomenclature variants
-    variants: list[str] = []
+    # 6) Specialized integrator / fiber keywords
+    if ptype in ("ODF", "SPLITTER", "CAJA_NAP", "OLT_GPON"):
+        strategies.append(
+            (
+                "fiber_integrator",
+                f"{model or brand} fibra óptica {ptype.replace('_', ' ')} SC/APC".strip()[:160],
+            )
+        )
+    # 7) Reliable ecommerce query
+    strategies.append(
+        ("ecommerce", f"{brand} {model} comprar Argentina".strip()[:140])
+    )
+    # 8) Marketplace-oriented
+    strategies.append(
+        ("marketplace", " ".join(x for x in [brand, model, ptype.replace('_', ' ')] if x)[:120])
+    )
+    # 9-10) Nomenclature variants (split into two buckets)
+    variants_a: list[str] = []
+    variants_b: list[str] = []
     if model:
-        variants.append(model)
-        variants.append(model.replace("-", ""))
-        variants.append(model.replace("-", " "))
-    if "FO4075" in (model or "").upper() or "FO-4075" in (line_spec.normalized_spec or "").upper():
-        variants.extend(["FO-4075", "FO4075", "PLC SPLITTER 1x16 SC/APC GLC"])
+        variants_a.extend([model, model.replace("-", ""), model.replace("-", " ")])
+    if "FO4075" in (model or "").upper() or "FO-4075" in norm.upper():
+        variants_a.extend(["FO-4075", "FO4075"])
+        variants_b.append("PLC SPLITTER 1x16 SC/APC GLC")
     if "FDB" in (model or "").upper():
-        variants.extend(["GLC-FDB-012-01", "caja NAP 1x8 SC/APC"])
-    if "9163" in (model or "").upper() or "meraki" in line_spec.normalized_spec.lower():
-        variants.extend(["Catalyst 9163E", "Meraki Wi-Fi 6E Outdoor AP", "Cisco 9163E Meraki"])
+        variants_a.append("GLC-FDB-012-01")
+        variants_b.append("caja NAP interior FTTB 1x8 SC/APC")
+    if "9163" in (model or "").upper() or "meraki" in norm.lower():
+        variants_a.append("Catalyst 9163E")
+        variants_b.extend(["Meraki Wi-Fi 6E Outdoor AP", "CW9163E-MR"])
     if "AP217" in (model or "").upper():
-        variants.extend(["WI-AP217-Lite", "Wi-Tek access point interior"])
-    if "UPS3500" in (model or "").upper() or "3000" in line_spec.normalized_spec:
-        variants.extend(["Atomlux UPS3500 3500VA", "UPS 3000 VA Atomlux"])
-    if "ODF" in ptype or "odf" in line_spec.normalized_spec.lower():
-        variants.extend(["ODF 12 puertos SC/APC", "caja de empalme fibra 12 puertos"])
-    strategies.append(("nomenclature", " ".join(dict.fromkeys(variants))[:200] or line_spec.product))
+        variants_a.append("WI-AP217-Lite")
+        variants_b.append("Wi-Tek access point interior 2.4 5 GHz")
+    if "UPS3500" in (model or "").upper() or "3000" in norm:
+        variants_a.append("Atomlux UPS3500 3500VA")
+        variants_b.append("UPS 3000 VA Atomlux 220V exacto")
+    if "ODF" in ptype or "odf" in norm.lower():
+        variants_a.append("ODF 12 puertos SC/APC")
+        variants_b.append("pachera fibra ODF 12 SC/APC empalme")
+    strategies.append(("nomenclature_a", " ".join(dict.fromkeys(variants_a))[:200] or line_spec.product))
+    strategies.append(("nomenclature_b", " ".join(dict.fromkeys(variants_b))[:200] or f"{brand} {model}".strip()))
 
-    # Dedup by query text, keep order, max 5
+    # Dedup by query text, keep order, max 10
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
     for name, q in strategies:
@@ -89,7 +110,7 @@ def _search_strategies(line_spec) -> list[tuple[str, str]]:
             continue
         seen.add(key)
         out.append((name, q.strip()))
-        if len(out) >= 5:
+        if len(out) >= 10:
             break
     return out
 

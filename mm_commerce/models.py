@@ -78,6 +78,7 @@ class Tender(Base):
         String(32), default="NO VERIFICADO"
     )
     notes: Mapped[str] = mapped_column(Text, default="")
+    bid_scope_json: Mapped[str] = mapped_column(Text, default="{}")
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="tender")
     items: Mapped[list["TenderItem"]] = relationship(back_populates="tender")
@@ -286,6 +287,10 @@ _QUOTE_EXTRA_COLUMNS: dict[str, str] = {
     "evidence_json": "TEXT DEFAULT '{}'",
 }
 
+_TENDER_EXTRA_COLUMNS: dict[str, str] = {
+    "bid_scope_json": "TEXT DEFAULT '{}'",
+}
+
 _OFFER_EXTRA_COLUMNS: dict[str, str] = {
     "merchandise_cost": "FLOAT",
     "logistics_cost": "FLOAT",
@@ -328,6 +333,7 @@ def ensure_schema(engine=None) -> None:
     _add("opportunities", _OPP_EXTRA_COLUMNS)
     _add("supplier_quotes", _QUOTE_EXTRA_COLUMNS)
     _add("offers", _OFFER_EXTRA_COLUMNS)
+    _add("tenders", _TENDER_EXTRA_COLUMNS)
 
 
 def init_db(database_url: str | None = None):

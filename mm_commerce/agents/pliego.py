@@ -7,6 +7,8 @@ from mm_commerce.agents.base import BaseAgent
 from mm_commerce.connectors.codineu import find_pliego_docs, read_pliego_text
 from mm_commerce.connectors.pliego_download import download_opportunity_docs
 from mm_commerce.extractors.pliego_lines import extract_line_items
+from mm_commerce.extractors.bid_scope import parse_bid_scope
+import json
 from mm_commerce.models import Opportunity, Tender, TenderItem
 from mm_commerce.config import get_settings
 
@@ -118,6 +120,17 @@ class PliegoAgent(BaseAgent):
             )
 
         opp.line_count = len(items)
+
+        # BID_SCOPE from official pliego extract
+        if text:
+            scope = parse_bid_scope(text, line_count=len(items) or None)
+            tender.bid_scope_json = json.dumps(scope.to_dict(), ensure_ascii=False)
+            tender.notes = (tender.notes or "") + f"; bid_scope={scope.state}"
+        else:
+            from mm_commerce.extractors.bid_scope import BidScope, STATE_UNKNOWN
+            empty = BidScope(state=STATE_UNKNOWN, blocks_presentation=True, notes="sin pliego")
+            tender.bid_scope_json = json.dumps(empty.to_dict(), ensure_ascii=False)
+
         if tender.doc_path and str(tender.doc_path).startswith("http"):
             opp.pliego_url = tender.doc_path
         elif not opp.pliego_url:

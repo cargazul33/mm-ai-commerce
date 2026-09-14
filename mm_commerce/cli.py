@@ -150,6 +150,7 @@ def circuit_cmd(external_id: str, send: bool, min_fit: int) -> None:
         notify_high_fit,
         simulate_callback,
         build_full_detail,
+        push_opportunity_report,
     )
     from mm_commerce.timing import ACTIONABLE_TIMING, classify_timing
 
@@ -195,6 +196,7 @@ def circuit_cmd(external_id: str, send: bool, min_fit: int) -> None:
         ver = VerifierAgent(session).process(opp)
         bid = BidAgent(session).process(opp)
         session.refresh(opp)
+        report_push = push_opportunity_report(session, opp)
         if opp.approval_status != "BLOQUEADO":
             opp.state = "TELEGRAM"
         session.commit()
@@ -236,6 +238,7 @@ def circuit_cmd(external_id: str, send: bool, min_fit: int) -> None:
             "risk": risk,
             "verifier": ver,
             "bid": bid,
+            "report": report_push,
             "telegram": tg,
             "approval_persisted": persisted,
             "simulate_view_ok": bool((sim_view or {}).get("ok")),

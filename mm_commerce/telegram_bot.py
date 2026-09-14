@@ -168,6 +168,9 @@ def apply_callback(
     action, ext_id = data.split(":", 1)
     action = action.strip().lower()
     ext_id = ext_id.strip()
+    if action.startswith("rfq_") or action in ("enviar_rfq", "descartar"):
+        from mm_commerce.rfq import handle_rfq_callback
+        return handle_rfq_callback(data)
     opp = session.query(Opportunity).filter_by(external_id=ext_id).one_or_none()
     if opp is None:
         return {"ok": False, "error": "OPP_NOT_FOUND", "id": ext_id}
@@ -408,3 +411,78 @@ def simulate_callback(
 # backward compat
 def callback_stub(data: str) -> str:
     return f"use apply_callback for {data}"
+
+
+def send_telegram_text(text: str, *, reply_markup: dict | None = None) -> dict[str, Any]:
+    """Send a plain text message to allowlisted user (or CLI fallback)."""
+    settings = get_settings()
+    print("\n===== CLI TELEGRAM =====\n" + text[:4000] + "\n========================\n")
+    token = (settings.telegram_bot_token or "").strip()
+    user_id = (settings.telegram_user_id or "").strip()
+    if not token or not user_id:
+        return {"status": "CLI_ONLY", "chars": len(text)}
+    try:
+        import httpx
+        payload: dict[str, Any] = {
+            "chat_id": user_id,
+            "text": text[:4000],
+            "disable_web_page_preview": True,
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        with httpx.Client(timeout=30.0) as client:
+            r = client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json=payload,
+            )
+        return {
+            "status": "SENT" if r.status_code == 200 else "ERROR",
+            "http": r.status_code,
+            "body": r.text[:300],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def push_opportunity_report(session: Session, opp: Opportunity) -> dict[str, Any]:
+    """Build matching report + RFQ drafts and push to Telegram."""
+    from mm_commerce.report import write_matching_report, format_matching_report_text
+    from mm_commerce.rfq import format_rfq_telegram, rfq_inline_keyboard
+
+    jp, tp, report = write_matching_report(session, opp)
+    text = format_matching_report_text(report)
+    tg = send_telegram_text(text)
+    rfq_results = []
+    for d in report.get("rfq_drafts") or []:
+        msg = format_rfq_telegram(
+            __import__("mm_commerce.rfq", fromlist=["RfqDraft"]).RfqDraft(**{
+                k: d[k]
+                for k in (
+                    "rfq_id",
+                    "opportunity_id",
+                    "line_no",
+                    "proveedor",
+                    "contacto",
+                    "producto",
+                    "requisitos",
+                    "cantidad",
+                    "mensaje",
+                    "url",
+                    "missing",
+                    "status",
+                    "created_at",
+                )
+                if k in d
+            })
+        )
+        rfq_results.append(
+            send_telegram_text(msg, reply_markup=rfq_inline_keyboard(d["rfq_id"]))
+        )
+    return {
+        "report_json": str(jp),
+        "report_txt": str(tp),
+        "telegram": tg,
+        "rfq_telegram": rfq_results,
+        "modalidad": report.get("modalidad"),
+        "apto_global": report.get("apto_global"),
+    }
