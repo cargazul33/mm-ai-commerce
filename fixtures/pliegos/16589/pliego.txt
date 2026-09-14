@@ -1,12 +1,22 @@
 PLIEGO DE BASES Y CONDICIONES — Contratación Directa N° 954
 Adquisición de equipamientos informáticos
+Pedido de Presupuesto (extracto fixture offline — NO VERIFICADO)
 
-Ítems solicitados (extracto para fixture offline):
-1) 10 unidades Notebook 15 pulgadas Intel i5 16GB RAM 512GB SSD Windows 11
-2) 10 unidades Monitor LED 24 pulgadas HDMI
-3) 5 unidades Impresora láser monocromática red Ethernet
-4) 20 cartuchos toner compatible para impresora láser
+Re Cant Sol Per Item                                      Per Cant Precio         Precio
+            Sol                                           Ofr Ofr Unitario         Total
+ 1    10        Notebook 15 pulgadas Intel i5 16GB RAM 512GB SSD Windows 11
+                                                                   $          $
+                Marca Ofrecida:
+ 2    10        Monitor LED 24 pulgadas HDMI
+                                                                   $          $
+                Marca Ofrecida:
+ 3     5        Impresora láser monocromática red Ethernet
+                                                                   $          $
+                Marca Ofrecida:
+ 4    20        Cartucho toner compatible para impresora láser
+                                                                   $          $
+                Marca Ofrecida:
 
+Cantidad de Renglones a Cotizar: 4                                       Total Cotizado:
 Entrega: Neuquén capital — plazo según pliego.
-Apertura: ver portal CODINEU.
 NOTA: fixture de prueba — NO VERIFICADO contra original.

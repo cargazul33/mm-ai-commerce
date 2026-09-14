@@ -17,7 +17,7 @@ RADAR → PLIEGO → SOURCING → PRICING → RISK → VERIFIER → TELEGRAM
 |--------|-----|
 | commander | Orquesta estados |
 | radar | CODINEU público/fixtures, dedupe, FIT SCORE 0–100, hard-skip `16514` |
-| pliego | Ítems estructurados; **NO inventa**; marca `NO VERIFICADO` |
+| pliego | Ítems SAFIPRO/PDF/texto; **NO inventa** (sin proxy título); `NO VERIFICADO`/`SIN_LINEAS` |
 | sourcing | Proveedores (MercadoLibre público + allowlist stub); MATCH SCORE |
 | pricing | `COST_TOTAL`; `PRECIO_OBJETIVO = COST × 1.90`; tax/flete `PENDING` |
 | risk | `BAJO\|MEDIO\|ALTO\|CRITICO` |
@@ -59,8 +59,9 @@ python -m mm_commerce radar --once
 # Pipeline completo una vez
 python -m mm_commerce run --once
 
-# Digest CLI (sin Telegram)
-python -m mm_commerce digest
+# Digest CLI — tarjetas estilo Telegram (sin token)
+python -m mm_commerce digest --limit 10
+python -m mm_commerce digest --json-out
 ```
 
 ### Telegram
@@ -70,7 +71,7 @@ Con token: alerta a usuario allowlist con botones stub `APROBAR|RECHAZAR|VER…`
 
 ## Datos (honestidad)
 
-- **CODINEU:** fixtures en `fixtures/codineu_sample.json`; opcional snapshot `/workspace/codineu-vigentes.json`.
+- **CODINEU:** parseo live GeneXus `GridContainerDataV` → fallback fixtures/`codineu-list.html`/`codineu_sample.json`.
 - Login privado: `/home/box/.config/codineu/login.env` si existe; si no → `REQUIERE CREDENCIALES`.
 - Portales energía (YPF, etc.): conectores **stub** `REQUIERE CREDENCIALES`.
 - **Hard skip forever:** proceso CODINEU `16514`.

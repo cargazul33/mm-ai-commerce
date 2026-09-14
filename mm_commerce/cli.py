@@ -47,7 +47,6 @@ def run_cmd(once: bool, limit: int, min_fit: int | None) -> None:
     session = get_session()
     try:
         result = Commander(session).run_once(limit=limit, min_fit=min_fit)
-        # compact print
         out = {
             "radar": result["radar"],
             "processed": result["processed"],
@@ -60,35 +59,43 @@ def run_cmd(once: bool, limit: int, min_fit: int | None) -> None:
 
 
 @main.command("digest")
-def digest_cmd() -> None:
+@click.option("--limit", default=10, show_default=True, help="Top N oportunidades")
+@click.option("--min-fit", default=None, type=int, help="Umbral FIT (default settings)")
+@click.option("--json-out", "json_out", is_flag=True, help="Salida JSON cruda")
+def digest_cmd(limit: int, min_fit: int | None, json_out: bool) -> None:
+    """Telegram-style cards para top oportunidades (CLI, free)."""
     init_db()
     session = get_session()
     try:
         from mm_commerce.models import Opportunity
-        from mm_commerce.config import get_settings
 
         s = get_settings()
+        threshold = s.fit_score_alert_min if min_fit is None else min_fit
         rows = (
             session.query(Opportunity)
             .filter(Opportunity.skipped.is_(False))
-            .filter(Opportunity.fit_score >= s.fit_score_alert_min)
+            .filter(Opportunity.fit_score >= threshold)
             .order_by(Opportunity.fit_score.desc())
-            .limit(20)
+            .limit(limit)
             .all()
         )
         digest = [
             {
                 "id": o.external_id,
-                "title": o.title[:120],
+                "title": o.title[:140],
                 "fit_score": o.fit_score,
                 "risk": o.risk_level,
                 "state": o.state,
                 "approval": o.approval_status,
                 "organism": o.organism,
+                "apertura": o.opening_at,
             }
             for o in rows
         ]
-        click.echo(format_digest(digest))
+        if json_out:
+            click.echo(json.dumps(digest, ensure_ascii=False, indent=2))
+        else:
+            click.echo(format_digest(digest))
     finally:
         session.close()
 

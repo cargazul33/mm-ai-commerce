@@ -11,20 +11,46 @@ from mm_commerce.config import get_settings
 log = logging.getLogger(__name__)
 
 
+def format_card(d: dict) -> str:
+    """Una tarjeta estilo Telegram por oportunidad."""
+    oid = d.get("id", "?")
+    fit = d.get("fit_score", "-")
+    risk = d.get("risk") or "—"
+    approval = d.get("approval") or "PENDIENTE"
+    organism = (d.get("organism") or "—")[:48]
+    title = (d.get("title") or "")[:140]
+    state = d.get("state") or ""
+    apertura = d.get("apertura") or d.get("opening_at") or ""
+    lines = [
+        f"┌─ #{oid} · FIT {fit} · RISK {risk}",
+        f"│ {title}",
+        f"│ 🏛 {organism}",
+    ]
+    if apertura:
+        lines.append(f"│ 📅 {apertura}")
+    if state:
+        lines.append(f"│ estado={state} · {approval}")
+    else:
+        lines.append(f"│ {approval}")
+    lines.append("│ [APROBAR]  [RECHAZAR]  [VER…]")
+    lines.append("└────────────────────────────")
+    return "\n".join(lines)
+
+
 def format_digest(digest: list[dict]) -> str:
     if not digest:
-        return "M&M AI Commerce — sin oportunidades accionables (fit alto)."
-    lines = ["🔔 M&M AI Commerce — oportunidades accionables", ""]
-    for d in digest:
-        lines.append(
-            f"#{d['id']} FIT={d['fit_score']} RISK={d.get('risk') or '-'} "
-            f"[{d.get('approval')}] {d.get('organism','')[:40]}"
+        return (
+            "🔔 M&M AI Commerce — digest vacío\n"
+            "Sin oportunidades accionables (fit alto / no skip)."
         )
-        lines.append(f"  {d.get('title','')[:100]}")
-        lines.append("  [APROBAR] [RECHAZAR] [VER…]  (callbacks stub sin token)")
-        lines.append("")
-    lines.append("Humano solo APRUEBA dinero/legal. Nunca auto-submit.")
-    return "\n".join(lines)
+    header = [
+        "🔔 M&M AI Commerce — top oportunidades",
+        f"Tarjetas: {len(digest)} · humano solo APRUEBA dinero/legal",
+        "Nunca auto-submit.",
+        "",
+    ]
+    cards = [format_card(d) for d in digest]
+    return "\n".join(header + cards)
 
 
 def notify_high_fit(session: Session, digest: list[dict]) -> dict[str, Any]:
@@ -46,7 +72,6 @@ def notify_high_fit(session: Session, digest: list[dict]) -> dict[str, Any]:
         import httpx
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        # Inline keyboard stubs
         reply_markup = {
             "inline_keyboard": [
                 [

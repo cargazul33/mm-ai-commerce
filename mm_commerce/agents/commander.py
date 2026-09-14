@@ -109,12 +109,13 @@ class Commander(BaseAgent):
             digest.append(
                 {
                     "id": o.external_id,
-                    "title": o.title[:120],
+                    "title": o.title[:140],
                     "fit_score": o.fit_score,
                     "risk": o.risk_level,
                     "state": o.state,
                     "approval": o.approval_status,
                     "organism": o.organism,
+                    "apertura": o.opening_at,
                 }
             )
         return digest
