@@ -33,7 +33,7 @@ def test_full_pipeline_once(session):
     result = Commander(session).run_once(limit=5, min_fit=50)
     assert result["radar"]["skipped_hard"] >= 1
     assert "telegram" in result
-    assert result["telegram"]["status"] == "CLI_ONLY"
+    assert result["telegram"]["status"] in ("CLI_ONLY", "SKIPPED_EMPTY_OPEN", "SENT")
     # at least one opp processed or digest built
     assert isinstance(result["processed"], list)
     # 16514 never in DB

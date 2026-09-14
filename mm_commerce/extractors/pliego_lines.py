@@ -16,7 +16,7 @@ from typing import Any
 #   10     20      ROSETA PARA RED; Tipo ...
 SAFIPRO_ROW = re.compile(
     r"^\s*(?P<ren>\d{1,3})\s+(?P<qty>\d+[.,]?\d*)\s+"
-    r"(?P<product>[A-ZÁÉÍÓÚÑÜ][A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9 /&\-\.\(\)\+]{2,}(?:;.*)?)\s*$",
+    r"(?P<product>[A-ZÁÉÍÓÚÑÜ][A-Za-zÁÉÍÓÚáéíóúÑñÜü0-9 /&\-\.\(\)\+:@°×,]{2,}(?:;.*)?)\s*$",
     re.M,
 )
 
@@ -145,36 +145,45 @@ def _flatten_safipro_blocks(text: str) -> str:
 
 
 def _from_safipro(text: str) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    seen: set[int] = set()
+    items: dict[int, dict[str, Any]] = {}
+    legalese = (
+        "ley ", "decreto", "artículo", "articulo", "en caso", "el nombre",
+        "se comunica", "saludo", "página", "pagina", "plazo de", "forma de pago",
+        "mantenimiento de oferta", "cantidad de renglones",
+    )
     for m in SAFIPRO_ROW.finditer(text):
         ren = int(m.group("ren"))
-        if ren in seen:
-            continue
         qty = _parse_qty(m.group("qty"))
         product = _clean_product(m.group("product"))
         if qty is None or qty <= 0 or len(product) < 3:
             continue
-        # reject legal boilerplate false positives
-        if product.lower().startswith(("ley ", "decreto", "artículo", "articulo")):
+        low = product.lower()
+        if any(low.startswith(x) for x in legalese):
             continue
-        seen.add(ren)
-        brand = _brand_from(product)
-        items.append(
-            {
-                "line_no": ren,
-                "product": product.split(";")[0].strip()[:200],
-                "qty": qty,
-                "unit": "u",
-                "brand": brand,
-                "model": "",
-                "specs": product[:400],
-                "verification": "NO VERIFICADO",
-                "source_pattern": "safipro_row",
-            }
-        )
-    items.sort(key=lambda x: x["line_no"])
-    return items
+        has_semi = ";" in product
+        # Prefer SAFIPRO catalog rows (NAME; specs…) over prose false positives
+        cand = {
+            "line_no": ren,
+            "product": product.split(";")[0].strip()[:200],
+            "qty": qty,
+            "unit": "u",
+            "brand": _brand_from(product),
+            "model": "",
+            "specs": product[:400],
+            "verification": "NO VERIFICADO",
+            "source_pattern": "safipro_row",
+            "_has_semi": has_semi,
+        }
+        prev = items.get(ren)
+        if prev is None:
+            items[ren] = cand
+        elif has_semi and not prev.get("_has_semi"):
+            items[ren] = cand
+    out = []
+    for it in sorted(items.values(), key=lambda x: x["line_no"]):
+        it.pop("_has_semi", None)
+        out.append(it)
+    return out
 
 
 def _from_numbered(text: str) -> list[dict[str, Any]]:

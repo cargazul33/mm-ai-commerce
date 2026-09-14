@@ -13,3 +13,6 @@ build/
 offers_out/
 *.log
 .pytest_cache/
+
+data/pliegos/
+offers_out/

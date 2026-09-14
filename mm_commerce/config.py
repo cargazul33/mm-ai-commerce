@@ -1,13 +1,12 @@
 """Configuración ZERO SPEND — sin APIs de pago."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Categorías a evitar inicialmente
+# Hard-avoid (categoría / organismo / título)
 AVOID_CATEGORIES = (
     "salud",
     "medicament",
@@ -15,22 +14,42 @@ AVOID_CATEGORIES = (
     "policia",
     "construcción pesada",
     "construccion pesada",
-    "maquinaria",
+    "maquinaria pesada",
     "obras",
+    "instalaciones complejas",
+    "instalacion compleja",
+    "instalación compleja",
+    "prótesis",
+    "protesis",
+    "traumato",
 )
 
-# Prioridad comercial M&M
+# Didáctico/escolar: NO alto FIT por título solo — requiere renglones revendibles
+DIDACTIC_FLAGS = (
+    "didáctic",
+    "didactic",
+    "escolar",
+    "material didact",
+    "material didáct",
+)
+
+# Prioridad comercial M&M (rubros revendibles)
 PRIORITY_KEYWORDS = (
     "informát",
     "informat",
+    "tecnolog",
     "notebook",
     "computadora",
     "pc ",
+    " pcs",
     "impresor",
     "printer",
     "redes",
     "network",
+    "conectividad",
     "electr",
+    "electrodomést",
+    "electrodomest",
     "oficina",
     "librer",
     "papeler",
@@ -44,9 +63,64 @@ PRIORITY_KEYWORDS = (
     "escritorio",
     "mueble",
     "herramienta liviana",
+    "herramientas livianas",
     "herramientas",
     "insumos inform",
     "equipamiento inform",
+    "elementos inform",
+    "hardware",
+    "switch",
+    "router",
+    "olt",
+    "gpon",
+    "fibra",
+    "wifi",
+    "wi-fi",
+    "access point",
+    "ups",
+    "estabilizador",
+    "splitter",
+    "revendible",
+    "insumos",
+)
+
+# Tokens de renglón que sí permiten alto FIT en didáctico
+RESELLABLE_LINE_KEYWORDS = (
+    "notebook",
+    "computadora",
+    "impresor",
+    "toner",
+    "cartucho",
+    "monitor",
+    "mouse",
+    "teclado",
+    "router",
+    "switch",
+    "cable utp",
+    "pendrive",
+    "disco",
+    "ssd",
+    "ram ",
+    "papel a4",
+    "resma",
+    "carpeta",
+    "folio",
+    "bolígrafo",
+    "boligrafo",
+    "lapicera",
+    "marcador",
+    "silla",
+    "escritorio",
+    "archivador",
+    "olt",
+    "gpon",
+    "fibra",
+    "ups",
+    "estabilizador",
+    "splitter",
+    "access point",
+    "wifi",
+    "wi-fi",
 )
 
 HARD_SKIP_IDS = frozenset({"16514"})
@@ -81,7 +155,6 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    # Ensure data dir exists relative to CWD or project
     s = Settings()
     db = s.database_url
     if db.startswith("sqlite:///"):

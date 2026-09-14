@@ -95,17 +95,29 @@ def row_to_item(row: list[Any], detail_url: str = "") -> dict[str, Any] | None:
     if not organismo and "\n" in _cell(row, 4):
         organismo = _cell(row, 4).split("\n")[-1].strip()
     modalidad = _cell(row, 5) or _cell(row, 4).split("\n")[0]
+    publicacion = _cell(row, 14)
+    if publicacion.startswith("  /  /") or not publicacion.strip(" /0:"):
+        publicacion = ""
+    cierre_formal = _cell(row, 15)
+    if cierre_formal.startswith("  /  /") or not cierre_formal.strip(" /0:"):
+        cierre_formal = ""
+    apertura = _cell(row, 9)
     return {
         "id": ext_id,
         "numero": _cell(row, 6),
         "modalidad": modalidad,
         "titulo": titulo,
-        "apertura": _cell(row, 9),
+        "apertura": apertura,
+        "cierre": cierre_formal or apertura,
+        "cierre_formal": cierre_formal,
+        "publicacion": publicacion,
         "acto": _cell(row, 10),
         "estado_cod": _cell(row, 11),
         "organismo": organismo,
         "rubros": rubros,
         "url": detail_url
+        or f"{DETAIL_BASE}com.portallicitaciones.wwlicitacion#{ext_id}",
+        "pliego_url": detail_url
         or f"{DETAIL_BASE}com.portallicitaciones.wwlicitacion#{ext_id}",
     }
 
@@ -214,6 +226,7 @@ def fetch_public_list(timeout: float = 25.0) -> tuple[list[dict[str, Any]], str]
 def find_pliego_docs(process_id: str) -> list[Path]:
     s = get_settings()
     candidates = [
+        s.project_root / "data" / "pliegos" / str(process_id),
         Path(s.pliegos_dir) / str(process_id),
         s.project_root / "fixtures" / "pliegos" / str(process_id),
         Path("/workspace/pliegos") / str(process_id),

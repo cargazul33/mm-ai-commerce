@@ -13,6 +13,8 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -35,10 +37,17 @@ class Opportunity(Base):
     organism: Mapped[str] = mapped_column(String(255), default="")
     rubros: Mapped[str] = mapped_column(Text, default="")
     modality: Mapped[str] = mapped_column(String(255), default="")
-    opening_at: Mapped[str] = mapped_column(String(64), default="")
+    opening_at: Mapped[str] = mapped_column(String(64), default="")  # legacy display
+    cierre_at: Mapped[str] = mapped_column(String(64), default="")  # deadline / apertura acto
+    publicacion_at: Mapped[str] = mapped_column(String(64), default="")
+    timing_state: Mapped[str] = mapped_column(String(32), default="")
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    pliego_url: Mapped[str] = mapped_column(Text, default="")
+    line_count: Mapped[int] = mapped_column(Integer, default=0)
+    utilidad_estimada: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     url: Mapped[str] = mapped_column(Text, default="")
     fit_score: Mapped[int] = mapped_column(Integer, default=0)
-    state: Mapped[str] = mapped_column(String(32), default="RADAR")  # state machine
+    state: Mapped[str] = mapped_column(String(32), default="RADAR")
     risk_level: Mapped[str] = mapped_column(String(16), default="")
     approval_status: Mapped[str] = mapped_column(
         String(32), default="PENDIENTE"
@@ -88,7 +97,7 @@ class TenderItem(Base):
     specs: Mapped[str] = mapped_column(Text, default="")
     verification: Mapped[str] = mapped_column(
         String(32), default="NO VERIFICADO"
-    )  # CONFIRMADO|PROBABLE|NO VERIFICADO
+    )
 
     tender: Mapped["Tender"] = relationship(back_populates="items")
 
@@ -135,9 +144,13 @@ class SupplierQuote(Base):
     match_score: Mapped[int] = mapped_column(Integer, default=0)
     verification: Mapped[str] = mapped_column(
         String(32), default="NO VERIFICADO"
-    )  # CONFIRMADO|PROBABLE|NO VERIFICADO
+    )
     url: Mapped[str] = mapped_column(Text, default="")
     notes: Mapped[str] = mapped_column(Text, default="")
+    stock_note: Mapped[str] = mapped_column(Text, default="")
+    shipping_neuquen: Mapped[str] = mapped_column(Text, default="")
+    verified_at: Mapped[str] = mapped_column(String(64), default="")
+    match_pct: Mapped[int] = mapped_column(Integer, default=0)
 
     supplier: Mapped["Supplier"] = relationship(back_populates="quotes")
 
@@ -155,8 +168,16 @@ class Offer(Base):
     package_path: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(
         String(32), default="BORRADOR"
-    )  # NEVER auto-submit
+    )
     notes: Mapped[str] = mapped_column(Text, default="")
+    merchandise_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    logistics_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    other_costs: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    utilidad: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    margen_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    capital_requerido: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    economic_json: Mapped[str] = mapped_column(Text, default="{}")
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="offers")
     items: Mapped[list["OfferItem"]] = relationship(back_populates="offer")
@@ -186,7 +207,7 @@ class Approval(Base):
     opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"))
     status: Mapped[str] = mapped_column(
         String(32), default="PENDIENTE"
-    )  # PENDIENTE|APROBADO|RECHAZADO|BLOQUEADO
+    )
     actor: Mapped[str] = mapped_column(String(64), default="human")
     reason: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -239,6 +260,35 @@ class LogisticsQuote(Base):
 _engine = None
 _SessionLocal = None
 
+# Columns added after initial MVP — ensure_schema ALTERs SQLite.
+_OPP_EXTRA_COLUMNS: dict[str, str] = {
+    "cierre_at": "VARCHAR(64) DEFAULT ''",
+    "publicacion_at": "VARCHAR(64) DEFAULT ''",
+    "timing_state": "VARCHAR(32) DEFAULT ''",
+    "archived": "BOOLEAN DEFAULT 0",
+    "pliego_url": "TEXT DEFAULT ''",
+    "line_count": "INTEGER DEFAULT 0",
+    "utilidad_estimada": "FLOAT",
+}
+
+_QUOTE_EXTRA_COLUMNS: dict[str, str] = {
+    "stock_note": "TEXT DEFAULT ''",
+    "shipping_neuquen": "TEXT DEFAULT ''",
+    "verified_at": "VARCHAR(64) DEFAULT ''",
+    "match_pct": "INTEGER DEFAULT 0",
+}
+
+_OFFER_EXTRA_COLUMNS: dict[str, str] = {
+    "merchandise_cost": "FLOAT",
+    "logistics_cost": "FLOAT",
+    "other_costs": "FLOAT",
+    "total_cost": "FLOAT",
+    "utilidad": "FLOAT",
+    "margen_pct": "FLOAT",
+    "capital_requerido": "FLOAT",
+    "economic_json": "TEXT DEFAULT '{}'",
+}
+
 
 def get_engine(database_url: str | None = None):
     global _engine, _SessionLocal
@@ -252,9 +302,29 @@ def get_engine(database_url: str | None = None):
     return _engine
 
 
+def ensure_schema(engine=None) -> None:
+    """create_all + additive ALTER for new Opportunity columns on existing DBs."""
+    eng = engine or get_engine()
+    Base.metadata.create_all(eng)
+    insp = inspect(eng)
+
+    def _add(table: str, cols: dict[str, str]) -> None:
+        if table not in insp.get_table_names():
+            return
+        existing = {c["name"] for c in insp.get_columns(table)}
+        with eng.begin() as conn:
+            for col, ddl in cols.items():
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+
+    _add("opportunities", _OPP_EXTRA_COLUMNS)
+    _add("supplier_quotes", _QUOTE_EXTRA_COLUMNS)
+    _add("offers", _OFFER_EXTRA_COLUMNS)
+
+
 def init_db(database_url: str | None = None):
     engine = get_engine(database_url)
-    Base.metadata.create_all(engine)
+    ensure_schema(engine)
     return engine
 
 

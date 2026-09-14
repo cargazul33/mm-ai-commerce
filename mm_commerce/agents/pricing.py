@@ -1,5 +1,7 @@
-"""PRICING — COST_TOTAL; PRECIO_OBJETIVO=COST×1.90; tax/logistics PENDING."""
+"""PRICING — merchandise + logistics + costs → ×1.90 → utilidad/margen/capital."""
 from __future__ import annotations
+
+import json
 
 from mm_commerce.agents.base import BaseAgent
 from mm_commerce.config import get_settings
@@ -31,35 +33,89 @@ class PricingAgent(BaseAgent):
             self.session.query(Tender).filter_by(opportunity_id=opp.id).one_or_none()
         )
 
-        # pick best quote per tender_item (or overall) with known cost
         chosen: list[SupplierQuote] = []
         seen_items: set[int | None] = set()
-        for q in quotes:
+        ranked = sorted(
+            quotes,
+            key=lambda q: (
+                0 if q.verification == "PROBABLE" else 1,
+                0 if q.unit_cost is not None else 1,
+                -q.match_score,
+            ),
+        )
+        for q in ranked:
             key = q.tender_item_id
             if key in seen_items and key is not None:
                 continue
             if q.unit_cost is None:
                 continue
+            if q.verification == "NO VERIFICADO" and not q.url:
+                continue
+            if (q.match_pct or q.match_score or 0) < 40:
+                continue  # weak evidence — do not use in economic base
             chosen.append(q)
             seen_items.add(key)
 
-        cost_total = None
+        merchandise = None
         if chosen:
-            cost_total = sum((q.unit_cost or 0) * (q.qty or 1) for q in chosen)
+            merchandise = round(
+                sum((q.unit_cost or 0) * (q.qty or 1) for q in chosen), 2
+            )
 
-        precio = None if cost_total is None else round(cost_total * mult, 2)
+        logistics = None
+        logistics_status = "PENDING"
+        other_costs = None
+
+        total = None
+        if merchandise is not None:
+            if logistics is None:
+                total = merchandise
+            else:
+                total = round(merchandise + (logistics or 0) + (other_costs or 0), 2)
+
+        precio = None if total is None else round(total * mult, 2)
+        utilidad = None if (precio is None or total is None) else round(precio - total, 2)
+        margen = None
+        if precio and total and precio > 0:
+            margen = round(100.0 * (precio - total) / precio, 2)
+        capital = total
 
         offer = Offer(
             opportunity_id=opp.id,
-            cost_total=cost_total,
+            cost_total=merchandise,
             precio_objetivo=precio,
             margin_multiplier=mult,
             tax_status="PENDING",
-            logistics_status="PENDING",
+            logistics_status=logistics_status,
             status="BORRADOR",
+            merchandise_cost=merchandise,
+            logistics_cost=logistics,
+            other_costs=other_costs,
+            total_cost=total,
+            utilidad=utilidad,
+            margen_pct=margen,
+            capital_requerido=capital,
+            economic_json=json.dumps(
+                {
+                    "merchandise": merchandise,
+                    "logistics": logistics,
+                    "logistics_status": logistics_status,
+                    "other_costs": other_costs,
+                    "total_cost": total,
+                    "precio_objetivo": precio,
+                    "multiplier": mult,
+                    "utilidad": utilidad,
+                    "margen_pct": margen,
+                    "capital_requerido": capital,
+                    "lines_priced": len(chosen),
+                    "lines_total": len(tender.items) if tender else 0,
+                    "note": "logistics PENDING — no inventar flete a Neuquén",
+                },
+                ensure_ascii=False,
+            ),
             notes=(
-                "tax/logistics PENDING — no inventar tasas"
-                if cost_total is not None
+                "tax/logistics PENDING — no inventar tasas/flete"
+                if merchandise is not None
                 else "sin costos verificados — no inventar"
             ),
         )
@@ -96,21 +152,24 @@ class PricingAgent(BaseAgent):
                     )
                 )
 
-        # logistics stub
         self.session.add(
             LogisticsQuote(
                 opportunity_id=opp.id,
                 carrier="",
                 amount=None,
                 status="PENDING",
-                notes="REQUIERE COTIZACIÓN REAL — no inventar flete",
+                notes="REQUIERE COTIZACIÓN REAL a Neuquén — no inventar flete",
             )
         )
 
+        if utilidad is not None:
+            opp.utilidad_estimada = utilidad
+
         self.finish_run(
             run,
-            f"cost_total={cost_total}; precio_objetivo={precio}; mult={mult}; "
-            f"tax=PENDING; logistics=PENDING; lines={len(chosen)}",
+            f"merch={merchandise}; total={total}; precio={precio}; "
+            f"utilidad={utilidad}; margen%={margen}; capital={capital}; "
+            f"lines={len(chosen)}",
         )
         opp.state = "PRICING"
         self.session.commit()

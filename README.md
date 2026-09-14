@@ -69,6 +69,18 @@ python -m mm_commerce digest --json-out
 Sin `TELEGRAM_BOT_TOKEN` / `TELEGRAM_USER_ID` el digest se imprime por CLI.
 Con token: alerta a usuario allowlist con botones stub `APROBAR|RECHAZAR|VER…`.
 
+## Timing (BA)
+
+- Estados: `ABIERTA | CIERRA_HOY | VENCIDA | FECHA_NO_VERIFICADA` (zoneinfo `America/Argentina/Buenos_Aires`).
+- VENCIDAS se auto-archivan y **nunca** van a Telegram.
+- FIT didáctico: título solo no da FIT alto sin renglones revendibles.
+
+## Circuito económico
+
+```bash
+USE_FIXTURES=0 python -m mm_commerce circuit --id <CODINEU_ID> --send
+```
+
 ## Datos (honestidad)
 
 - **CODINEU:** parseo live GeneXus `GridContainerDataV` → fallback fixtures/`codineu-list.html`/`codineu_sample.json`.

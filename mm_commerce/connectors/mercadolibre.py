@@ -22,7 +22,11 @@ def load_allowlist() -> list[dict[str, Any]]:
 
 
 def search_public(query: str, limit: int = 5, timeout: float = 12.0) -> tuple[list[dict[str, Any]], str]:
-    """Búsqueda pública MLA. Si bloqueada → stubs allowlist."""
+    """Búsqueda pública MLA. Live (USE_FIXTURES=0): sin stubs de precio inventado."""
+    from mm_commerce.timing import now_ba
+
+    settings = get_settings()
+    verified_at = now_ba().isoformat(timespec="seconds")
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             r = client.get(
@@ -31,10 +35,13 @@ def search_public(query: str, limit: int = 5, timeout: float = 12.0) -> tuple[li
                 headers={"User-Agent": UA},
             )
             if r.status_code != 200:
-                return _stub_matches(query), f"ml_http_{r.status_code}_stub"
+                if settings.use_fixtures:
+                    return _stub_matches(query), f"ml_http_{r.status_code}_stub"
+                return [], f"ml_http_{r.status_code}_no_stub"
             data = r.json()
             results = []
             for item in data.get("results", [])[:limit]:
+                avail = item.get("available_quantity")
                 results.append(
                     {
                         "title": item.get("title", ""),
@@ -44,13 +51,20 @@ def search_public(query: str, limit: int = 5, timeout: float = 12.0) -> tuple[li
                         "seller": (item.get("seller") or {}).get("nickname", "mercadolibre"),
                         "verification": "PROBABLE",
                         "source": "mercadolibre",
+                        "stock": str(avail) if avail is not None else "NO VERIFICADO",
+                        "shipping_neuquen": "NO VERIFICADO",
+                        "verified_at": verified_at,
                     }
                 )
             if not results:
-                return _stub_matches(query), "ml_empty_stub"
+                if settings.use_fixtures:
+                    return _stub_matches(query), "ml_empty_stub"
+                return [], "ml_empty"
             return results, "mercadolibre_live"
     except Exception as exc:  # noqa: BLE001
-        return _stub_matches(query), f"ml_error:{type(exc).__name__}_stub"
+        if settings.use_fixtures:
+            return _stub_matches(query), f"ml_error:{type(exc).__name__}_stub"
+        return [], f"ml_error:{type(exc).__name__}"
 
 
 def _stub_matches(query: str) -> list[dict[str, Any]]:
