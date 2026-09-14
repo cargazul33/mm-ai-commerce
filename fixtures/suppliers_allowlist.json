@@ -1,0 +1,62 @@
+[
+  {
+    "name": "Insumos Neuquén Stub",
+    "product": "Notebook 15 i5 16GB 512SSD",
+    "specs": "notebook informática oficina",
+    "unit_cost": 850000,
+    "currency": "ARS",
+    "url": "https://example.local/stub/notebook-i5",
+    "verification": "PROBABLE",
+    "notes": "allowlist stub offline — no inventar en prod"
+  },
+  {
+    "name": "Toner Center Stub",
+    "product": "Toner HP 85A compatible",
+    "specs": "toner cartucho impresora HP",
+    "unit_cost": 28500,
+    "currency": "ARS",
+    "url": "https://example.local/stub/toner-85a",
+    "verification": "PROBABLE",
+    "notes": "allowlist stub"
+  },
+  {
+    "name": "Oficina Total Stub",
+    "product": "Resma A4 75g x 500 hojas",
+    "specs": "librería papelería útiles oficina resma",
+    "unit_cost": 4200,
+    "currency": "ARS",
+    "url": "https://example.local/stub/resma-a4",
+    "verification": "PROBABLE",
+    "notes": "allowlist stub"
+  },
+  {
+    "name": "Muebles Sur Stub",
+    "product": "Silla ergonómica estructura metálica",
+    "specs": "silla oficina ergonómica mobiliario",
+    "unit_cost": 145000,
+    "currency": "ARS",
+    "url": "https://example.local/stub/silla-ergo",
+    "verification": "PROBABLE",
+    "notes": "allowlist stub"
+  },
+  {
+    "name": "Redes Patagonia Stub",
+    "product": "Switch 24 puertos Gigabit",
+    "specs": "redes switch network electricidad telefonía",
+    "unit_cost": 220000,
+    "currency": "ARS",
+    "url": "https://example.local/stub/switch-24",
+    "verification": "NO VERIFICADO",
+    "notes": "precio stub — verificar antes de ofertar"
+  },
+  {
+    "name": "PC Armado Stub",
+    "product": "Computadora de escritorio i5 16GB SSD",
+    "specs": "computadora pc escritorio informática",
+    "unit_cost": 780000,
+    "currency": "ARS",
+    "url": "https://example.local/stub/pc-i5",
+    "verification": "PROBABLE",
+    "notes": "allowlist stub"
+  }
+]
