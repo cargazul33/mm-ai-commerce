@@ -125,6 +125,13 @@ class Supplier(Base):
     country: Mapped[str] = mapped_column(String(8), default="AR")
     notes: Mapped[str] = mapped_column(Text, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Commercial contact (RFQ) — never store product URL as CONTACTO
+    razon_social: Mapped[str] = mapped_column(String(255), default="")
+    web: Mapped[str] = mapped_column(Text, default="")
+    email: Mapped[str] = mapped_column(String(255), default="")
+    whatsapp: Mapped[str] = mapped_column(String(64), default="")
+    telefono: Mapped[str] = mapped_column(String(64), default="")
+    contact_verified_at: Mapped[str] = mapped_column(String(64), default="")
 
     quotes: Mapped[list["SupplierQuote"]] = relationship(back_populates="supplier")
 
@@ -291,6 +298,15 @@ _TENDER_EXTRA_COLUMNS: dict[str, str] = {
     "bid_scope_json": "TEXT DEFAULT '{}'",
 }
 
+_SUPPLIER_EXTRA_COLUMNS: dict[str, str] = {
+    "razon_social": "VARCHAR(255) DEFAULT ''",
+    "web": "TEXT DEFAULT ''",
+    "email": "VARCHAR(255) DEFAULT ''",
+    "whatsapp": "VARCHAR(64) DEFAULT ''",
+    "telefono": "VARCHAR(64) DEFAULT ''",
+    "contact_verified_at": "VARCHAR(64) DEFAULT ''",
+}
+
 _OFFER_EXTRA_COLUMNS: dict[str, str] = {
     "merchandise_cost": "FLOAT",
     "logistics_cost": "FLOAT",
@@ -334,6 +350,7 @@ def ensure_schema(engine=None) -> None:
     _add("supplier_quotes", _QUOTE_EXTRA_COLUMNS)
     _add("offers", _OFFER_EXTRA_COLUMNS)
     _add("tenders", _TENDER_EXTRA_COLUMNS)
+    _add("suppliers", _SUPPLIER_EXTRA_COLUMNS)
 
 
 def init_db(database_url: str | None = None):

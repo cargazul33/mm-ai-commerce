@@ -265,5 +265,55 @@ def circuit_cmd(external_id: str, send: bool, min_fit: int) -> None:
         session.close()
 
 
+
+@main.command("rfq")
+@click.option("--id", "external_id", required=True, help="CODINEU process id")
+@click.option("--line", "line_no", required=True, type=int, help="Renglón (ej. 5)")
+@click.option("--send/--no-send", default=False, help="Enviar tarjeta draft a Telegram (no al proveedor)")
+@click.option("--chat-id", default=None, help="Override chat id (must match allowlist)")
+def rfq_cmd(external_id: str, line_no: int, send: bool, chat_id: str | None) -> None:
+    """Genera RFQ asistido EXACTO (nunca auto-envía al proveedor)."""
+    from mm_commerce.rfq import run_rfq_for_line
+
+    init_db()
+    session = get_session()
+    try:
+        result = run_rfq_for_line(
+            session,
+            opportunity_id=str(external_id),
+            line_no=int(line_no),
+            send_telegram=send,
+            chat_id=chat_id,
+        )
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    finally:
+        session.close()
+
+
+@main.command("rfq-reply")
+@click.option("--rfq-id", default=None)
+@click.option("--id", "external_id", default=None)
+@click.option("--line", "line_no", default=None, type=int)
+@click.option("--text", "reply_text", required=True, help="Texto pegado de respuesta proveedor")
+def rfq_reply_cmd(rfq_id: str | None, external_id: str | None, line_no: int | None, reply_text: str) -> None:
+    """Ingesta respuesta proveedor (parse + COMMERCIAL_STATUS + pricing)."""
+    from mm_commerce.rfq import ingest_supplier_reply
+
+    init_db()
+    session = get_session()
+    try:
+        result = ingest_supplier_reply(
+            session,
+            rfq_id=rfq_id,
+            opportunity_id=external_id,
+            line_no=line_no,
+            text=reply_text,
+        )
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    finally:
+        session.close()
+
+
+
 if __name__ == "__main__":
     main()

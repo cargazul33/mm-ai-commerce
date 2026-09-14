@@ -168,8 +168,15 @@ def apply_callback(
     action, ext_id = data.split(":", 1)
     action = action.strip().lower()
     ext_id = ext_id.strip()
-    if action.startswith("rfq_") or action in ("enviar_rfq", "descartar"):
+    if action.startswith("rfq_") or action in (
+        "enviar_rfq",
+        "descartar",
+        "enviar_whatsapp",
+        "enviar_email",
+        "copiar",
+    ):
         from mm_commerce.rfq import handle_rfq_callback
+
         return handle_rfq_callback(data)
     opp = session.query(Opportunity).filter_by(external_id=ext_id).one_or_none()
     if opp is None:
@@ -373,13 +380,13 @@ def poll_callbacks_once(
                     else f"ERR {result.get('error')}"
                 )
                 answer_callback_query(token, cq_id, msg)
-            if result.get("ok") and result.get("action") == "view" and result.get("detail"):
+            if result.get("ok") and result.get("detail"):
                 try:
                     client.post(
                         f"https://api.telegram.org/bot{token}/sendMessage",
                         json={
                             "chat_id": from_user,
-                            "text": result["detail"][:4000],
+                            "text": str(result["detail"])[:4000],
                             "disable_web_page_preview": True,
                         },
                     )
@@ -413,14 +420,25 @@ def callback_stub(data: str) -> str:
     return f"use apply_callback for {data}"
 
 
-def send_telegram_text(text: str, *, reply_markup: dict | None = None) -> dict[str, Any]:
+def send_telegram_text(
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+    chat_id: str | None = None,
+) -> dict[str, Any]:
     """Send a plain text message to allowlisted user (or CLI fallback)."""
     settings = get_settings()
     print("\n===== CLI TELEGRAM =====\n" + text[:4000] + "\n========================\n")
     token = (settings.telegram_bot_token or "").strip()
-    user_id = (settings.telegram_user_id or "").strip()
+    user_id = (chat_id or settings.telegram_user_id or "").strip()
     if not token or not user_id:
         return {"status": "CLI_ONLY", "chars": len(text)}
+    # Defense: only allowlist unless explicit chat_id matches allowlist
+    allow = str(settings.telegram_user_id or "").strip()
+    if allow and str(user_id) != allow and not chat_id:
+        return {"status": "ERROR", "error": "USER_NOT_ALLOWLISTED", "user_id": user_id}
+    if allow and chat_id and str(chat_id) != allow:
+        return {"status": "ERROR", "error": "USER_NOT_ALLOWLISTED", "user_id": chat_id}
     try:
         import httpx
         payload: dict[str, Any] = {
@@ -439,6 +457,7 @@ def send_telegram_text(text: str, *, reply_markup: dict | None = None) -> dict[s
             "status": "SENT" if r.status_code == 200 else "ERROR",
             "http": r.status_code,
             "body": r.text[:300],
+            "chat_id": str(user_id),
         }
     except Exception as exc:  # noqa: BLE001
         return {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
@@ -454,30 +473,9 @@ def push_opportunity_report(session: Session, opp: Opportunity) -> dict[str, Any
     tg = send_telegram_text(text)
     rfq_results = []
     for d in report.get("rfq_drafts") or []:
-        msg = format_rfq_telegram(
-            __import__("mm_commerce.rfq", fromlist=["RfqDraft"]).RfqDraft(**{
-                k: d[k]
-                for k in (
-                    "rfq_id",
-                    "opportunity_id",
-                    "line_no",
-                    "proveedor",
-                    "contacto",
-                    "producto",
-                    "requisitos",
-                    "cantidad",
-                    "mensaje",
-                    "url",
-                    "missing",
-                    "status",
-                    "created_at",
-                )
-                if k in d
-            })
-        )
-        rfq_results.append(
-            send_telegram_text(msg, reply_markup=rfq_inline_keyboard(d["rfq_id"]))
-        )
+        msg = format_rfq_telegram(d)
+        kb = None if d.get("blocked") else rfq_inline_keyboard(d["rfq_id"])
+        rfq_results.append(send_telegram_text(msg, reply_markup=kb))
     return {
         "report_json": str(jp),
         "report_txt": str(tp),
