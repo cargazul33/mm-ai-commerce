@@ -387,8 +387,9 @@ SEED_CATALOG: list[dict[str, Any]] = [
         "categories": {"access_point_indoor"},
         "require_any": ("wi-ap217", "ap217", "access point interior", "wi-tek"),
         "urls": [
+            "https://bydemes.com/en/products/networking/wireless/access-points/WITEK-0167",
             "https://www.biosegur.com.ar/wi-tek-wi-ap217-lite-access-point-para-montaje-en-cielorrasos-con-administracion-centralizada-witek-witec--det--P2360",
-            "https://www.wireless-tek.com/product_show.php?id=122",
+            "https://www.wireless-tek.com/product_show.php?id=352",
         ],
         "seller": "Biosegur/Wi-Tek",
     },

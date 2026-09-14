@@ -28,6 +28,7 @@ from mm_commerce.matching import (
     COMM_PRECIO_NO_VER,
     COMM_SIN_STOCK,
     COMM_STOCK_INSUF,
+    COMM_STOCK_NO_VER,
     TECH_EXACTO,
     validate_evidence_consistency,
 )
@@ -465,6 +466,10 @@ def format_rfq_telegram(draft: RfqDraft | dict) -> str:
     head = "📝 RFQ ASISTIDO (NO ENVIADO)"
     if blocked or status == "BLOCKED":
         head = "🚫 RFQ BLOQUEADO"
+    email_ok = bool((d.get("email") or "").strip() and "@" in (d.get("email") or ""))
+    btns = "[ENVIAR WHATSAPP] "
+    btns += "[ENVIAR EMAIL] " if email_ok else "[EMAIL DESHABILITADO] "
+    btns += "[COPIAR] [DESCARTAR]"
     return "\n".join(
         [
             f"{head} · {d.get('rfq_id')}",
@@ -487,23 +492,33 @@ def format_rfq_telegram(draft: RfqDraft | dict) -> str:
             "MENSAJE:",
             (d.get("mensaje") or "")[:1800],
             "",
-            "[ENVIAR WHATSAPP] [ENVIAR EMAIL] [COPIAR] [DESCARTAR]",
+            btns,
             "⚠ Ningún botón envía sin aprobación explícita de Mariano",
             (f"BLOQUEO: {d.get('block_reason')}" if d.get("block_reason") else ""),
         ]
     ).strip()
 
 
-def rfq_inline_keyboard(rfq_id: str) -> dict:
-    """Telegram buttons — prepare/copy only; NEVER auto-send."""
-    # callback_data max 64 bytes
+def rfq_inline_keyboard(
+    rfq_id: str,
+    *,
+    email: str | None = None,
+    whatsapp: str | None = None,
+    draft: dict | None = None,
+) -> dict:
+    """Telegram buttons — prepare/copy only; NEVER auto-send.
+
+    ENVIAR EMAIL is omitted/disabled when email is NULL/empty.
+    """
     rid = rfq_id[:48]
+    d = draft or {}
+    em = (email if email is not None else d.get("email") or "").strip()
+    row1 = [{"text": "ENVIAR WHATSAPP", "callback_data": f"rfq_wa:{rid}"}]
+    if em and "@" in em:
+        row1.append({"text": "ENVIAR EMAIL", "callback_data": f"rfq_email:{rid}"})
     return {
         "inline_keyboard": [
-            [
-                {"text": "ENVIAR WHATSAPP", "callback_data": f"rfq_wa:{rid}"},
-                {"text": "ENVIAR EMAIL", "callback_data": f"rfq_email:{rid}"},
-            ],
+            row1,
             [
                 {"text": "COPIAR", "callback_data": f"rfq_copy:{rid}"},
                 {"text": "DESCARTAR", "callback_data": f"rfq_discard:{rid}"},
@@ -772,20 +787,14 @@ def parse_supplier_reply(text: str) -> dict[str, Any]:
 
 
 def _infer_commercial_status(parsed: dict, *, needed_qty: float) -> str:
-    price = parsed.get("unit_price")
-    stock = str(parsed.get("stock") or "").strip()
-    shipping = str(parsed.get("shipping") or "").strip()
-    if price is None:
-        return COMM_PRECIO_NO_VER
-    if stock in ("", "NO VERIFICADO"):
-        return COMM_STOCK_INSUF
-    if stock == "0" or re.search(r"sin|agotado", stock, re.I):
-        return COMM_SIN_STOCK
-    if stock.isdigit() and needed_qty and int(stock) < needed_qty:
-        return COMM_STOCK_INSUF
-    if shipping in ("", "NO VERIFICADO"):
-        return COMM_ENVIO_NO_VER
-    return COMM_DISPONIBLE
+    from mm_commerce.matching import classify_commercial
+
+    return classify_commercial(
+        price=parsed.get("unit_price"),
+        stock=str(parsed.get("stock") or ""),
+        shipping_neuquen=str(parsed.get("shipping") or ""),
+        qty_needed=float(needed_qty or 1),
+    )
 
 
 def ingest_supplier_reply(
@@ -926,7 +935,7 @@ def send_rfq_draft_card(
 
     d = draft.to_dict() if isinstance(draft, RfqDraft) else draft
     text = format_rfq_telegram(d)
-    kb = None if d.get("blocked") else rfq_inline_keyboard(d["rfq_id"])
+    kb = None if d.get("blocked") else rfq_inline_keyboard(d["rfq_id"], email=d.get("email"), draft=d)
     # allow override chat id via temporary settings mutation is avoided —
     # send_telegram_text uses settings; callers should set TELEGRAM_USER_ID
     return send_telegram_text(text, reply_markup=kb, chat_id=chat_id)

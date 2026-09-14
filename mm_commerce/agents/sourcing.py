@@ -320,6 +320,17 @@ class SourcingAgent(BaseAgent):
                     )
                     if x
                 )
+                from mm_commerce.authoritative_specs import merge_tech_candidate_text
+
+                tech_title, tech_text, tech_url, auth = merge_tech_candidate_text(
+                    brand=ref["brand"],
+                    model=ref["model"],
+                    ecommerce_title=res.get("title") or "",
+                    ecommerce_text=page_text,
+                )
+                # Tech evidence source: official distributor/manufacturer when available.
+                # Ecommerce URL kept on quote for price/stock/shipping reference.
+                evidence_url = tech_url or url
                 cref = session_iso.bind_candidate(
                     tender_item_id=tender_item_id,
                     url=url,
@@ -332,9 +343,9 @@ class SourcingAgent(BaseAgent):
                     specs=ref["specs"],
                     brand=ref["brand"],
                     model=ref["model"],
-                    candidate_title=res.get("title") or "",
-                    candidate_text=page_text,
-                    source_url=url,
+                    candidate_title=tech_title or (res.get("title") or ""),
+                    candidate_text=tech_text or page_text,
+                    source_url=evidence_url,
                     price=res.get("price"),
                     stock=str(res.get("stock") or ""),
                     shipping_neuquen=str(res.get("shipping_neuquen") or ""),
@@ -343,6 +354,11 @@ class SourcingAgent(BaseAgent):
                     candidate_id=cref.candidate_id,
                     line_no=line_no,
                 )
+                if auth:
+                    mres.notes = (
+                        (mres.notes or "")
+                        + f" | AUTH_TECH:{auth.get('tier')}:{auth.get('source_url')}"
+                    )
                 # Force NO_CUMPLE if early wrong-type flag
                 if res.get("_wrong_type"):
                     mres.technical_status = TECH_NO_CUMPLE

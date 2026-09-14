@@ -474,7 +474,7 @@ def push_opportunity_report(session: Session, opp: Opportunity) -> dict[str, Any
     rfq_results = []
     for d in report.get("rfq_drafts") or []:
         msg = format_rfq_telegram(d)
-        kb = None if d.get("blocked") else rfq_inline_keyboard(d["rfq_id"])
+        kb = None if d.get("blocked") else rfq_inline_keyboard(d["rfq_id"], email=d.get("email"), draft=d)
         rfq_results.append(send_telegram_text(msg, reply_markup=kb))
     return {
         "report_json": str(jp),

@@ -1,8 +1,11 @@
 """Hard attribute matching — TECHNICAL status separate from COMMERCIAL status.
 
 TECHNICAL_STATUS: EXACTO | EQUIVALENTE_PERMITIDO | POSIBLE | NO_VERIFICADO | NO_CUMPLE
-COMMERCIAL_STATUS: DISPONIBLE | STOCK_INSUFICIENTE | SIN_STOCK | PRECIO_NO_VERIFICADO
-                   | ENVIO_NO_VERIFICADO | NO_DISPONIBLE
+COMMERCIAL_STATUS: DISPONIBLE | STOCK_INSUFICIENTE | STOCK_NO_VERIFICADO | SIN_STOCK
+                   | PRECIO_NO_VERIFICADO | ENVIO_NO_VERIFICADO | NO_DISPONIBLE
+
+Validation types: EXACT_TEXT | NORMALIZED_TEXT | NUMERIC | ENUM | BOOLEAN | MODEL_ID | RANGE | MULTI_VALUE
+TECH EXACTO only if fail_count=0 and unknown_count=0 (no weak inferences).
 
 Rules:
 - PRODUCT_TYPE identity FIRST — wrong principal object → NO_CUMPLE, MATCH max 20%
@@ -39,6 +42,7 @@ BLOCKING_TECH = frozenset(
 # --- COMMERCIAL --------------------------------------------------------------
 COMM_DISPONIBLE = "DISPONIBLE"
 COMM_STOCK_INSUF = "STOCK_INSUFICIENTE"
+COMM_STOCK_NO_VER = "STOCK_NO_VERIFICADO"
 COMM_SIN_STOCK = "SIN_STOCK"
 COMM_PRECIO_NO_VER = "PRECIO_NO_VERIFICADO"
 COMM_ENVIO_NO_VER = "ENVIO_NO_VERIFICADO"
@@ -116,6 +120,36 @@ VERIFIED_CLASSES = VERIFIED_TECH
 BLOCKING_CLASSES = BLOCKING_TECH
 
 INTERNAL_VALIDATION_ERROR = "INTERNAL_VALIDATION_ERROR"
+
+# Evidence validation types (strict — no weak keyword inferences)
+VT_EXACT_TEXT = "EXACT_TEXT"
+VT_NORMALIZED_TEXT = "NORMALIZED_TEXT"
+VT_NUMERIC = "NUMERIC"
+VT_ENUM = "ENUM"
+VT_BOOLEAN = "BOOLEAN"
+VT_MODEL_ID = "MODEL_ID"
+VT_RANGE = "RANGE"
+VT_MULTI_VALUE = "MULTI_VALUE"
+
+RESULT_PASS = "CUMPLE"  # PASS
+RESULT_FAIL = "NO_CUMPLE"  # FAIL
+RESULT_UNKNOWN = "NO_VERIFICADO"  # UNKNOWN
+
+KIND_TO_VALIDATION = {
+    "text": VT_EXACT_TEXT,
+    "brand": VT_NORMALIZED_TEXT,
+    "model": VT_MODEL_ID,
+    "numeric_min": VT_NUMERIC,
+    "range": VT_RANGE,
+    "multi_value": VT_MULTI_VALUE,
+    "enum": VT_ENUM,
+    "boolean": VT_BOOLEAN,
+    "normalized_text": VT_NORMALIZED_TEXT,
+    "exact_text": VT_EXACT_TEXT,
+    "product_type": VT_ENUM,
+    "not_support": VT_BOOLEAN,
+}
+
 
 
 def summarize_evidence_counts(evidence: list[AttrEvidence]) -> dict[str, int | str | None]:
@@ -197,6 +231,16 @@ class HardRequirement:
     numeric_value: float | None = None
     numeric_unit: str = ""
     aliases: list[str] = field(default_factory=list)
+    # RANGE / MULTI_VALUE helpers
+    range_min: float | None = None
+    range_max: float | None = None
+    require_all: list[str] = field(default_factory=list)  # MULTI_VALUE: all must match
+    validation_type: str = ""
+
+    def resolved_validation_type(self) -> str:
+        if self.validation_type:
+            return self.validation_type
+        return KIND_TO_VALIDATION.get(self.kind, VT_EXACT_TEXT)
 
 
 @dataclass
@@ -206,14 +250,39 @@ class AttrEvidence:
     required: str
     found: str
     source_url: str
-    result: str  # CUMPLE | NO_CUMPLE | NO_VERIFICADO | N/A
+    result: str  # CUMPLE(PASS) | NO_CUMPLE(FAIL) | NO_VERIFICADO(UNKNOWN) | N/A
     mandatory: bool = True
+    found_raw: str = ""
+    found_normalized: str = ""
+    source_snippet: str = ""
+    validation_type: str = VT_EXACT_TEXT
+
+    def __post_init__(self) -> None:
+        if not self.found_raw and self.found:
+            self.found_raw = self.found
+        if not self.found_normalized and self.found:
+            self.found_normalized = self.found
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # Public PASS|FAIL|UNKNOWN alongside legacy CUMPLE|NO_CUMPLE|NO_VERIFICADO
+        if self.result == "CUMPLE":
+            d["result_label"] = "PASS"
+        elif self.result == "NO_CUMPLE":
+            d["result_label"] = "FAIL"
+        elif self.result == "N/A":
+            d["result_label"] = "N/A"
+        else:
+            d["result_label"] = "UNKNOWN"
+        d["attribute"] = self.key or self.label
+        return d
 
     def matrix_row(self) -> str:
-        return f"{self.label}|{self.required}|{self.found}|{self.source_url}|{self.result}"
+        vt = self.validation_type or ""
+        return (
+            f"{self.label}|{self.required}|{self.found}|{self.source_url}|"
+            f"{self.result}|{vt}"
+        )
 
 
 @dataclass
@@ -857,18 +926,33 @@ def extract_hard_requirements(
                 label="ACCESS_POINT",
                 required="Access Point",
                 mandatory=True,
-                kind="text",
-                aliases=["access point", "punto de acceso", "wi-ap", "ap217", "ap "],
+                kind="normalized_text",
+                validation_type=VT_NORMALIZED_TEXT,
+                aliases=["access point", "punto de acceso", "wi-ap", "ap217"],
             )
         )
+        # NEVER treat model suffix "lite" as indoor proof
         reqs.append(
             HardRequirement(
                 key="indoor",
                 label="INDOOR",
-                required="interior/indoor",
+                required="interior/indoor/ceiling-mounted indoor",
                 mandatory=True,
-                kind="text",
-                aliases=["interior", "indoor", "lite"],
+                kind="normalized_text",
+                validation_type=VT_NORMALIZED_TEXT,
+                aliases=[
+                    "interior",
+                    "indoor",
+                    "cielorraso",
+                    "cielorrasos",
+                    "ceiling mount",
+                    "ceiling-mounted",
+                    "ceiling mounted",
+                    "montaje en cielorraso",
+                    "montaje en cielorrasos",
+                    "wall/ceiling",
+                    "installation environment indoor",
+                ],
             )
         )
         reqs.append(
@@ -877,31 +961,44 @@ def extract_hard_requirements(
                 label="no_router_generico",
                 required="Access Point (no router genérico)",
                 mandatory=True,
-                kind="text",
+                kind="normalized_text",
+                validation_type=VT_NORMALIZED_TEXT,
                 aliases=["access point", "punto de acceso", "wi-ap", "ap217"],
             )
         )
-        if "2.4" in low or "5 ghz" in low or "5ghz" in low:
+        if "2.4" in low or "5 ghz" in low or "5ghz" in low or "dual" in low:
             reqs.append(
                 HardRequirement(
                     key="bands",
                     label="bandas",
                     required="2.4 GHz + 5 GHz",
                     mandatory=True,
-                    kind="text",
-                    aliases=["2.4", "5 ghz", "5ghz", "dual"],
+                    kind="multi_value",
+                    validation_type=VT_MULTI_VALUE,
+                    aliases=["2.4", "5 ghz", "5ghz"],
+                    require_all=["2.4", "5"],  # BOTH required — 2.4 alone is NOT PASS
                 )
             )
         m_spd = re.search(r"velocidad\s*(\d{2,4}\s*[-–]\s*\d{3,5})\s*mbps", low)
         if m_spd or "573" in low or "4800" in low:
+            req_spd = m_spd.group(1).replace(" ", "") + " Mbps" if m_spd else "573-4800 Mbps"
+            rmin, rmax = 573.0, 4800.0
+            if m_spd:
+                nums = re.findall(r"\d+", m_spd.group(1))
+                if len(nums) >= 2:
+                    rmin, rmax = float(nums[0]), float(nums[1])
             reqs.append(
                 HardRequirement(
                     key="speed",
                     label="velocidad",
-                    required=m_spd.group(1).replace(" ", "") + " Mbps" if m_spd else "573-4800 Mbps",
+                    required=req_spd,
                     mandatory=True,
-                    kind="text",
-                    aliases=["573", "4800", "mbps"],
+                    kind="range",
+                    validation_type=VT_RANGE,
+                    range_min=rmin,
+                    range_max=rmax,
+                    numeric_unit="Mbps",
+                    aliases=[],  # bare "mbps" is NOT evidence
                 )
             )
         if "lan" in low:
@@ -911,7 +1008,8 @@ def extract_hard_requirements(
                     label="ethernet",
                     required="puerto LAN Ethernet",
                     mandatory=False,
-                    kind="text",
+                    kind="normalized_text",
+                    validation_type=VT_NORMALIZED_TEXT,
                     aliases=["lan", "ethernet", "rj-45", "rj45"],
                 )
             )
@@ -1020,6 +1118,19 @@ def extract_hard_requirements(
     return reqs
 
 
+def _stock_unknown(stock_s: str) -> bool:
+    s = (stock_s or "").strip()
+    if not s:
+        return True
+    u = s.upper()
+    if u in ("NO VERIFICADO", "NO_VERIFICADO", "UNKNOWN", "N/D", "ND", "N/A"):
+        return True
+    # InStock without qty is still unknown qty for STOCK_INSUFICIENTE checks
+    if u == "INSTOCK":
+        return True
+    return False
+
+
 def classify_commercial(
     *,
     price: float | None = None,
@@ -1027,7 +1138,11 @@ def classify_commercial(
     shipping_neuquen: str = "",
     qty_needed: float = 1.0,
 ) -> str:
-    """COMMERCIAL_STATUS — never mixed into technical class."""
+    """COMMERCIAL_STATUS — never mixed into technical class.
+
+    STOCK_INSUFICIENTE only when found numeric stock < required qty.
+    Unknown stock → STOCK_NO_VERIFICADO (never STOCK_INSUFICIENTE).
+    """
     stock_s = str(stock or "").strip()
     ship = str(shipping_neuquen or "").strip()
     if price is None:
@@ -1036,7 +1151,7 @@ def classify_commercial(
         return COMM_SIN_STOCK
     # numeric stock (only when digits present — avoid float("nan") traps)
     digits = re.sub(r"[^\d.]", "", stock_s)
-    if digits and re.search(r"\d", digits):
+    if digits and re.search(r"\d", digits) and not _stock_unknown(stock_s):
         try:
             n = float(digits)
             if n == 0:
@@ -1045,14 +1160,115 @@ def classify_commercial(
                 return COMM_STOCK_INSUF
         except ValueError:
             pass
+    if _stock_unknown(stock_s):
+        return COMM_STOCK_NO_VER
     if not ship or ship.upper() in ("NO VERIFICADO", "NO_VERIFICADO", ""):
-        # price+stock ok but envío unknown
-        if stock_s and stock_s.upper() not in ("NO VERIFICADO", "NO_VERIFICADO", ""):
-            return COMM_ENVIO_NO_VER
         return COMM_ENVIO_NO_VER
-    if stock_s.upper() in ("NO VERIFICADO", "NO_VERIFICADO", ""):
-        return COMM_STOCK_INSUF
     return COMM_DISPONIBLE
+
+
+
+def _snippet_around(blob: str, needle: str, *, radius: int = 60) -> str:
+    if not blob or not needle:
+        return ""
+    low = blob.lower()
+    n = needle.lower()
+    i = low.find(n)
+    if i < 0:
+        return (blob[: radius * 2]).strip()
+    start = max(0, i - radius)
+    end = min(len(blob), i + len(needle) + radius)
+    return blob[start:end].strip()
+
+
+def _extract_mbps_values(text: str) -> list[float]:
+    """Numeric Mbps/Mb/s only — bare unit token is NOT evidence.
+
+    Ignores tiny values (<50) that are almost never Wi-Fi throughput
+    (avoids treating '2.4 mbps' garbage / band leakage as speed).
+    """
+    t = (text or "").lower().replace(",", ".")
+    vals: list[float] = []
+    for m in re.finditer(
+        r"(\d+(?:\.\d+)?)\s*(?:mbps|mb/s|mbit)",
+        t,
+        re.I,
+    ):
+        try:
+            v = float(m.group(1))
+        except ValueError:
+            continue
+        if v >= 50:
+            vals.append(v)
+    # Combined dual-band pattern: 300Mbps at 2.4GHz + 867Mbps at 5GHz
+    if len(vals) >= 2:
+        vals.append(sum(vals[:2]))
+    # Explicit combined: up to 1200Mbps / wireless speed 1200
+    for m in re.finditer(r"(?:up to|hasta|velocidad(?:\s*inal[aá]mbrica)?)\s*(\d+(?:\.\d+)?)\s*(?:mbps|mb/s)", t):
+        try:
+            v = float(m.group(1))
+        except ValueError:
+            continue
+        if v >= 50:
+            vals.append(v)
+    return vals
+
+
+def _multi_value_hits(found_low: str, require_all: list[str]) -> tuple[list[str], list[str]]:
+    """Return (found_tokens, missing_tokens). Band tokens: '5' matches 5ghz/5 ghz/5g."""
+    found: list[str] = []
+    missing: list[str] = []
+    for tok in require_all:
+        t = (tok or "").lower().strip()
+        ok = False
+        if not t:
+            continue
+        if t == "2.4":
+            ok = bool(re.search(r"2[\.,]4\s*(?:ghz|g\b)?|2[\.,]4ghz", found_low))
+        elif t in ("5", "5ghz", "5 ghz"):
+            ok = bool(re.search(r"(?<![\d.])5\s*(?:ghz|g\b)|5ghz|5\.0\s*ghz", found_low))
+        else:
+            ok = t in found_low
+        if ok:
+            found.append(t)
+        else:
+            missing.append(t)
+    return found, missing
+
+
+def _ev(
+    *,
+    key: str,
+    label: str,
+    required: str,
+    found: str,
+    source_url: str,
+    result: str,
+    mandatory: bool = True,
+    validation_type: str = VT_EXACT_TEXT,
+    found_raw: str = "",
+    found_normalized: str = "",
+    source_snippet: str = "",
+    blob: str = "",
+) -> AttrEvidence:
+    raw = found_raw or found
+    norm = found_normalized or found
+    snip = source_snippet
+    if not snip and blob and raw and raw not in ("no encontrado", "no verificado", "sin evidencia"):
+        snip = _snippet_around(blob, str(raw).split(",")[0].strip() or str(raw))
+    return AttrEvidence(
+        key=key,
+        label=label,
+        required=required,
+        found=found,
+        source_url=source_url,
+        result=result,
+        mandatory=mandatory,
+        found_raw=raw,
+        found_normalized=norm,
+        source_snippet=snip,
+        validation_type=validation_type,
+    )
 
 
 def evaluate_match(
@@ -1404,24 +1620,170 @@ def evaluate_match(
                         has_missing = True
             continue
 
-        # text / brand
+        vt = req.resolved_validation_type()
+
+        # MULTI_VALUE — ALL required tokens must be evidenced (e.g. 2.4 AND 5 GHz)
+        if req.kind == "multi_value" or vt == VT_MULTI_VALUE:
+            need = list(req.require_all or req.aliases or [])
+            got, miss = _multi_value_hits(found_low, need)
+            if got and not miss:
+                evidence.append(
+                    _ev(
+                        key=req.key,
+                        label=req.label,
+                        required=req.required,
+                        found="+".join(got),
+                        source_url=source_url,
+                        result=RESULT_PASS,
+                        mandatory=req.mandatory,
+                        validation_type=VT_MULTI_VALUE,
+                        found_raw="+".join(got),
+                        found_normalized="+".join(got),
+                        blob=found_blob,
+                    )
+                )
+                if req.mandatory:
+                    mandatory_total += 1
+                    mandatory_ok += 1
+            elif got and miss:
+                # Partial multi-value is FAIL — not PASS
+                evidence.append(
+                    _ev(
+                        key=req.key,
+                        label=req.label,
+                        required=req.required,
+                        found=f"parcial:{'+'.join(got)}; falta:{'+'.join(miss)}",
+                        source_url=source_url,
+                        result=RESULT_FAIL,
+                        mandatory=req.mandatory,
+                        validation_type=VT_MULTI_VALUE,
+                        found_raw="+".join(got),
+                        found_normalized=f"missing={','.join(miss)}",
+                        blob=found_blob,
+                    )
+                )
+                has_contradiction = True
+                blockers.append(f"MULTI_VALUE_INCOMPLETE:{req.key}")
+                if req.mandatory:
+                    mandatory_total += 1
+            else:
+                evidence.append(
+                    _ev(
+                        key=req.key,
+                        label=req.label,
+                        required=req.required,
+                        found="no encontrado",
+                        source_url=source_url,
+                        result=RESULT_UNKNOWN,
+                        mandatory=req.mandatory,
+                        validation_type=VT_MULTI_VALUE,
+                    )
+                )
+                if req.mandatory:
+                    mandatory_total += 1
+                    has_missing = True
+            continue
+
+        # RANGE — need NUMERIC value(s); bare unit (mbps) is NOT evidence
+        if req.kind == "range" or vt == VT_RANGE:
+            vals = _extract_mbps_values(found_blob) if (req.numeric_unit or "").lower() in ("mbps", "mb/s", "") else []
+            if not vals and req.numeric_unit:
+                # generic number+unit
+                unit = re.escape(req.numeric_unit.lower())
+                for m in re.finditer(rf"(\d+(?:[.,]\d+)?)\s*{unit}", found_low):
+                    try:
+                        vals.append(float(m.group(1).replace(",", ".")))
+                    except ValueError:
+                        pass
+            rmin = req.range_min
+            rmax = req.range_max
+            if vals and rmin is not None and rmax is not None:
+                # PASS if any value falls within required range (or sum/combined)
+                in_range = [v for v in vals if rmin - 1e-9 <= v <= rmax + 1e-9]
+                if in_range:
+                    best = max(in_range)
+                    evidence.append(
+                        _ev(
+                            key=req.key,
+                            label=req.label,
+                            required=req.required,
+                            found=f"{best:g} {req.numeric_unit or 'Mbps'}".strip(),
+                            source_url=source_url,
+                            result=RESULT_PASS,
+                            mandatory=req.mandatory,
+                            validation_type=VT_RANGE,
+                            found_raw=str(best),
+                            found_normalized=f"{best:g}",
+                            blob=found_blob,
+                        )
+                    )
+                    if req.mandatory:
+                        mandatory_total += 1
+                        mandatory_ok += 1
+                else:
+                    evidence.append(
+                        _ev(
+                            key=req.key,
+                            label=req.label,
+                            required=req.required,
+                            found=f"{max(vals):g} {req.numeric_unit or ''}".strip(),
+                            source_url=source_url,
+                            result=RESULT_FAIL,
+                            mandatory=req.mandatory,
+                            validation_type=VT_RANGE,
+                            found_raw=str(max(vals)),
+                            found_normalized=str(max(vals)),
+                            blob=found_blob,
+                        )
+                    )
+                    has_contradiction = True
+                    blockers.append(f"RANGE_OUT:{req.key}")
+                    if req.mandatory:
+                        mandatory_total += 1
+            else:
+                # mbps without number → UNKNOWN (not PASS)
+                bare_unit = bool(re.search(r"\bmbps\b|\bmb/s\b", found_low)) and not vals
+                evidence.append(
+                    _ev(
+                        key=req.key,
+                        label=req.label,
+                        required=req.required,
+                        found="mbps sin número" if bare_unit else "no encontrado",
+                        source_url=source_url,
+                        result=RESULT_UNKNOWN,
+                        mandatory=req.mandatory,
+                        validation_type=VT_RANGE,
+                        found_raw="mbps" if bare_unit else "",
+                        found_normalized="",
+                    )
+                )
+                if req.mandatory:
+                    mandatory_total += 1
+                    has_missing = True
+            continue
+
+        # text / brand / normalized / exact
         aliases = req.aliases or [req.required]
         hit = next((a for a in aliases if a and a.lower() in found_low), None)
-        if not hit and req.kind == "brand":
+        if not hit and req.kind in ("brand", "normalized_text"):
             for a in aliases:
                 if _norm(a) and _norm(a) in _norm(found_blob):
                     hit = a
                     break
         if hit:
             evidence.append(
-                AttrEvidence(
+                _ev(
                     key=req.key,
                     label=req.label,
                     required=req.required,
                     found=str(hit),
                     source_url=source_url,
-                    result="CUMPLE",
+                    result=RESULT_PASS,
                     mandatory=req.mandatory,
+                    validation_type=vt,
+                    found_raw=str(hit),
+                    found_normalized=str(hit).lower(),
+                    blob=found_blob,
                 )
             )
             if req.mandatory:
@@ -1429,14 +1791,15 @@ def evaluate_match(
                 mandatory_ok += 1
         else:
             evidence.append(
-                AttrEvidence(
+                _ev(
                     key=req.key,
                     label=req.label,
                     required=req.required,
                     found="no encontrado",
                     source_url=source_url,
-                    result="NO_VERIFICADO",
+                    result=RESULT_UNKNOWN,
                     mandatory=req.mandatory,
+                    validation_type=vt,
                 )
             )
             if req.mandatory:
@@ -1565,6 +1928,10 @@ def match_line_to_candidate(
             numeric_value=r.numeric_value,
             numeric_unit=r.numeric_unit,
             aliases=list(r.aliases or []),
+            range_min=r.range_min,
+            range_max=r.range_max,
+            require_all=list(r.require_all or []),
+            validation_type=r.validation_type or r.resolved_validation_type(),
         )
         for r in reqs
     ]

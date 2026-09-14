@@ -139,7 +139,7 @@ def _seed_exacto(session, *, hard_ok: bool = True, stock="NO VERIFICADO", qty=2.
         "evidence_ok": ok,
         "evidence_total": 8,
         "technical_status": "EXACTO",
-        "commercial_status": "STOCK_INSUFICIENTE",
+        "commercial_status": "STOCK_NO_VERIFICADO",
         "brand": "Wi-Tek",
         "model": "WI-AP217-Lite",
     }
@@ -153,7 +153,7 @@ def _seed_exacto(session, *, hard_ok: bool = True, stock="NO VERIFICADO", qty=2.
         match_score=100,
         match_pct=100,
         technical_status="EXACTO",
-        commercial_status="STOCK_INSUFICIENTE",
+        commercial_status="STOCK_NO_VERIFICADO",
         stock_note=stock,
         shipping_neuquen="NO VERIFICADO",
         url="https://www.biosegur.com.ar/wi-tek-wi-ap217-lite-access-point--det--P2360",
@@ -246,9 +246,18 @@ def test_buttons_prepare_only_never_send(session):
     )
     persist_rfq_drafts(drafts, opportunity_id="16813")
     rid = drafts[0].rfq_id
-    kb = rfq_inline_keyboard(rid)
+    # email present on draft → ENVIAR EMAIL available
+    kb = rfq_inline_keyboard(rid, email=drafts[0].email, draft=drafts[0].to_dict())
     labels = [b["text"] for row in kb["inline_keyboard"] for b in row]
-    assert labels == ["ENVIAR WHATSAPP", "ENVIAR EMAIL", "COPIAR", "DESCARTAR"]
+    assert "ENVIAR WHATSAPP" in labels
+    assert "COPIAR" in labels and "DESCARTAR" in labels
+    if drafts[0].email and "@" in drafts[0].email:
+        assert "ENVIAR EMAIL" in labels
+    else:
+        assert "ENVIAR EMAIL" not in labels
+    # NULL email disables button
+    kb_off = rfq_inline_keyboard(rid, email=None)
+    assert "ENVIAR EMAIL" not in [b["text"] for row in kb_off["inline_keyboard"] for b in row]
 
     wa = handle_rfq_callback(f"rfq_wa:{rid}")
     assert wa["ok"] and wa["status"] == "PREPARED_WA"
